@@ -1,0 +1,18 @@
+{
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "cmake.generator": "Unix Makefiles",
+    "clangd.onConfigChanged": "restart",
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/build",
+        "--all-scopes-completion",
+        "--completion-style=detailed",
+        "--pch-storage=disk",
+        "--log=error",
+        "--j=8",
+        "--background-index",
+    ],
+    "editor.tabSize": 2,
+    "editor.detectIndentation": false,
+    "editor.insertSpaces": true,
+    "editor.suggest.snippetsPreventQuickSuggestions": false,
+}

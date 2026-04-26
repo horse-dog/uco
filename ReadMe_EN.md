@@ -1,0 +1,222 @@
+# 🚀 UCO — Uring-based Stackless Coroutine High-Performance HTTP Server
+
+<p align="center">
+  <strong>A lightweight, high-concurrency web server powered by Linux io_uring & C++20 coroutines</strong>
+</p>
+
+---
+
+## ✨ Features
+
+- **io_uring Driven**: Leverages async I/O capabilities from Linux kernel 6.8+
+- **Stackless Coroutine**: Built on C++20 coroutines with minimal memory overhead
+- **High Performance**: Achieves **120K+ QPS** (hello endpoint), **89K+ QPS** (static files)
+- **Keep-Alive Support**: Configurable connection reuse for maximum throughput
+- **Built-in Logging**: Async log consumer for high-performance log writing
+- **Optional jemalloc**: Supports jemalloc allocator for optimized memory performance
+
+---
+
+## 🔧 Environment Requirements
+
+| Dependency | Version | Description |
+|-----------|---------|-------------|
+| Linux Kernel | ≥ 6.8 | io_uring support |
+| g++ | ≥ 13 | C++20 standard required |
+| CMake | ≥ 3.20 | Build system |
+| liburing-dev | latest | io_uring library |
+| libprotobuf-dev | 3.x | Protocol Buffers |
+| protobuf-compiler | 3.x | protoc compiler |
+| libjemalloc-dev | optional | High-performance memory allocator |
+
+### One-click Dependency Installation
+
+```bash
+bash environment.sh
+```
+
+### Install wrk (Optional): sudo apt install wrk
+
+---
+
+## 📦 Build & Run
+
+```bash
+# Build
+mkdir build && cd build
+cmake ..
+make -j$(nproc)
+
+# Start log consumer (optional)
+./ulogcsm -o <logdir>
+
+# Start server
+./server
+```
+
+Default listening port: **8080**
+
+### Configuration
+
+Adjust initialization parameters in `main.cpp`:
+
+```cpp
+httpserver.Init(8080, 4, 1000000000, 30);
+```
+
+> ⚠️ **Benchmark Tip**: using `httpserver.Init(8080, 4, 1000000000, 30);` or similar large http-max-serve-count configurations for benchmarking, otherwise **read errors** may occur.
+
+### Enable jemalloc (Optional)
+
+jemalloc is optional — enable it based on your needs.
+
+Edit `CMakeLists.txt`:
+
+```cmake
+# Change OFF to ON (enable when needed)
+option(USE_JEMALLOC "Use jemalloc" ON)
+```
+
+Rebuild to take effect.
+
+---
+
+## 🧪 Performance Benchmarks
+
+### Test Environment
+
+| Item | Info |
+|------|------|
+| OS | Ubuntu 24.04.4 LTS (Noble Numbat) |
+| Kernel | 6.8.0-110-generic |
+| CPU | AMD EPYC 7K62 48-Core Processor / 4 Cores / 1 Thread/core |
+| Memory | 3.6 GB (Total) / 1.8 GB (Available) |
+| Disk | 40 GB (Total) / 28 GB (Available) |
+
+### UCO Benchmarks
+
+#### Hello Endpoint (Lightweight Response)
+
+```bash
+wrk -t4 -c500 -d10s http://127.0.0.1:8080/hello
+```
+
+```
+Running 10s test @ http://127.0.0.1:8080/hello
+  4 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     3.91ms    1.34ms  54.86ms   72.09%
+    Req/Sec    30.64k     1.33k   36.34k    75.50%
+  1222690 requests in 10.05s, 192.40MB read
+Requests/sec: 121645.42
+Transfer/sec:     19.14MB
+```
+
+📊 **QPS: ~121,645** | Avg Latency: **3.91ms**
+
+#### Multi-Endpoint Mixed Test
+
+```bash
+cd tests && wrk -t4 -c500 -d10s -s urls.lua http://127.0.0.1:8080
+```
+
+```
+Running 10s test @ http://127.0.0.1:8080
+  4 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     7.33ms    2.75ms  24.58ms   70.14%
+    Req/Sec    16.77k   661.23    20.51k    75.75%
+  669649 requests in 10.05s, 1.82GB read
+Requests/sec:  66642.15
+Transfer/sec:    185.56MB
+```
+
+📊 **QPS: ~66,642** | Avg Latency: **7.33ms**
+
+#### Static File (/index)
+
+```
+Running 10s test @ http://127.0.0.1:8080/index
+  4 threads and 500 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     5.46ms    1.79ms  20.08ms   73.66%
+    Req/Sec    22.40k     1.73k   34.90k    84.75%
+  894251 requests in 10.05s, 2.73GB read
+Requests/sec:  88978.76
+Transfer/sec:    278.16MB
+```
+
+📊 **QPS: ~88,979** | Avg Latency: **5.46ms**
+
+---
+
+## 📊 Comparison
+
+> Test environment: VMware Ubuntu 24.04 | 4 threads / 500 concurrent connections / 10s duration | `/index` endpoint
+
+| Framework | QPS | Avg Latency | Throughput | Notes |
+|-----------|-----|-------------|------------|-------|
+| **UCO** ⭐ | **88,979** | **5.46ms** | **278.16 MB/s** | This project |
+| Go + Gin | 60,139 | 22.33ms | 191.21 MB/s | `go run main.go` |
+| [WebServer (C++)](https://github.com/markparticle/WebServer) | 16,874 | 18.46ms | 52.62 MB/s | 26 timeouts observed |
+
+**Takeaway**: UCO leads Go+Gin by ~**48%** in QPS and WebServer(C++) by ~**428%**, while maintaining the lowest average latency.
+
+---
+
+## 🐛 Debugging Tools
+
+### Valgrind Memory Leak Detection (Optional)
+
+```bash
+# Install Valgrind
+wget -q https://sourceware.org/pub/valgrind/valgrind-3.24.0.tar.bz2
+cd valgrind-3.24.0
+./configure
+make -j$(nproc)
+sudo make install
+
+# Run with Valgrind
+cd build && valgrind ./server
+```
+
+### Quick System Info
+
+```bash
+echo "=== OS ===" && cat /etc/os-release | grep -E "NAME|VERSION" && \
+echo "=== Kernel ===" && uname -r && \
+echo "=== CPU ===" && lscpu | grep -E "Model name|CPU\(s\)|Thread|Core|Socket" && \
+echo "=== Memory ===" && free -h | head -2 && \
+echo "=== Disk ===" && df -h / | tail -1
+```
+
+---
+
+## 📁 Project Structure
+
+```
+uco/
+├── core/          # Coroutine core implementation (uco.h/cpp, usync.h)
+├── src/           # HTTP server modules (httpserver, httpresponce)
+├── common/        # Common utilities (allocator, etc.)
+├── proto/         # Protobuf definitions
+├── resources/     # Static resources (HTML/JS/images)
+├── test/          # Test cases & benchmark scripts
+├── gin_demo/      # Go/Gin comparison demo
+├── hook_exit/     # Hook related
+├── main.cpp       # Entry point
+├── CMakeLists.txt # Build configuration
+└── ReadMe.md      # This document
+```
+
+---
+
+## 📜 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+<p align="center">
+  <sub>Built with ❤️ using C++20 & io_uring</sub>
+</p>
