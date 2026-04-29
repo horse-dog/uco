@@ -3,6 +3,9 @@
 <p align="center">
   <strong>基于 Linux io_uring 与 C++20 协程的轻量级、高并发 Web 服务器</strong>
 </p>
+<p align="center">
+  <strong>本文档由 AI 生成</strong>
+</p>
 
 ---
 
