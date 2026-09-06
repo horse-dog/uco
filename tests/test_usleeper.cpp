@@ -1,7 +1,7 @@
 // usleeper 竞态与跨线程场景验证:
 // 基础睡眠路径 / 醒着时唤醒 / 跨线程唤醒 / 唤醒已到期的睡眠 /
 // 唤醒与到期同时发生 / 多定时器堆重排 / 堆中摘除非堆顶睡眠 /
-// 竞态压力 / 冲突睡眠 / 析构安全.
+// 中途插入更早的睡眠 / 竞态压力 / 冲突睡眠 / 析构安全.
 #include "usync.h"
 #include "uio.h"
 #include "ulog.h"
@@ -282,7 +282,35 @@ static uco::task<void> case_wake_non_head_sleeper()
           "non-head: s2 state clean after removal");
 }
 
-/// 8. 竞态压力: 多轮短睡 + 交错 wake, 验证无崩溃与状态无泄漏.
+/// 8. 中途插入更早的睡眠: s1 睡 2s (堆顶), s2 睡 3s, 1s 时新来的
+///    s3 只睡 0.5s (到期早于堆顶): 触发取消旧超时请求并重交新请求,
+///    三段睡眠的到期时刻均不受影响, 到期顺序与插入顺序相反.
+static uco::task<void> case_insert_earlier_sleeper()
+{
+    uco::usleeper s1, s2, s3;
+    sleep_outcome r1, r2, r3;
+    go timed_sleep(s1, 2s, &r1); // 堆顶, 超时请求对准 2s.
+    go timed_sleep(s2, 3s, &r2); // 非堆顶.
+    co_await uco_sleep(1s);      // 1s 后来了新 sleeper.
+    go timed_sleep(s3, 500ms, &r3); // 到期 1.5s < 2s: 堆顶切换, 重交超时.
+    co_await uco_sleep(2500ms);  // 等到 3.5s, 三段睡眠全部结束.
+
+    CHECK(r3.r == timer_result::EXPIRED && r3.elapsed_ms >= 450 &&
+              r3.elapsed_ms < 800,
+          "insert: late-arriving 0.5s sleeper expired on time, got",
+          r3.elapsed_ms, "ms");
+    CHECK(r1.r == timer_result::EXPIRED && r1.elapsed_ms >= 1950 &&
+              r1.elapsed_ms < 2400,
+          "insert: 2s sleeper unaffected by rearm, got", r1.elapsed_ms,
+          "ms");
+    CHECK(r2.r == timer_result::EXPIRED && r2.elapsed_ms >= 2950 &&
+              r2.elapsed_ms < 3400,
+          "insert: 3s sleeper expired on time, got", r2.elapsed_ms, "ms");
+    CHECK(r3.elapsed_ms < r1.elapsed_ms && r1.elapsed_ms < r2.elapsed_ms,
+          "insert: expiry order s3 < s1 < s2 (reverse of insertion)");
+}
+
+/// 9. 竞态压力: 多轮短睡 + 交错 wake, 验证无崩溃与状态无泄漏.
 static uco::task<void> case_stress(uco::usleeper &t)
 {
     const int rounds = 50;
@@ -302,7 +330,7 @@ static uco::task<void> case_stress(uco::usleeper &t)
           "stress: clean state after", rounds, "interleaved rounds");
 }
 
-/// 8. 冲突睡眠: A 挂起中, B 再睡同一 timer. B 得到 BUSY 而非 core,
+/// 10. 冲突睡眠: A 挂起中, B 再睡同一 timer. B 得到 BUSY 而非 core,
 ///    A 不受影响; 槽位在 A 恢复后正常释放.
 static uco::task<void> case_sleep_conflict(uco::usleeper &t)
 {
@@ -332,7 +360,7 @@ static uco::task<void> case_sleep_conflict(uco::usleeper &t)
           "conflict: slot released, sleeps full again");
 }
 
-/// 9. 析构安全: 醒着 (含待处理请求) 析构, 程序正常收尾.
+/// 11. 析构安全: 醒着 (含待处理请求) 析构, 程序正常收尾.
 static uco::task<void> case_destroy()
 {
     {
@@ -356,6 +384,7 @@ static uco::task<void> demo()
     co_await case_race_wake_vs_expiry(t);
     co_await case_multiple_timers();
     co_await case_wake_non_head_sleeper();
+    co_await case_insert_earlier_sleeper();
     co_await case_stress(t);
     co_await case_sleep_conflict(t);
     co_await case_destroy();
