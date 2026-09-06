@@ -22,7 +22,6 @@ include_directories(
     ${GENERATED_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/core
-    ${CMAKE_CURRENT_SOURCE_DIR}/utils
 )
 
 add_library(ulog core/ulogshm.cpp core/ulog.cpp)
@@ -37,7 +36,7 @@ add_library(
   core/usync.cpp
   core/udaemon.cpp
   core/uredis.cpp
-  utils/string_utils.cpp
+  core/utils/string_utils.cpp
 )
 target_link_libraries(uco PRIVATE uhook PUBLIC OpenSSL::Crypto)
 

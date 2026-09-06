@@ -19,7 +19,7 @@
 #include "ulog.h"
 #include "uredis.h"
 #include "usql.h"
-#include "string_utils.h"
+#include "utils/string_utils.h"
 
 HttpContext::HttpContext(
     HttpRequest *ptrReq, HttpResponse *ptrRsp,
