@@ -185,7 +185,7 @@ uco::task<bool> HttpConnection::Read()
     buf.Compact();
     if (m_httpRequest.m_state != HttpRequest::eParsingStart)
     {
-        SYSDBG("read more and extend buffer");
+        LOGDBG("read more and extend buffer");
         buf.DoubleSize();
     }
     uco_time_t ts = m_httpRequest.m_readReqTime;
@@ -256,7 +256,7 @@ uco::task<bool> HttpConnection::Write()
             continue;
         if (ret < 0)
         {
-            SYSERR("writev error:", strerror(-ret));
+            LOGERR("writev error:", strerror(-ret));
             co_return false;
         }
         advance_iov(iov1, iovcnt, ret);
@@ -295,11 +295,11 @@ uco::task<bool> HttpConnection::Write()
                 // EPIPE means client closed.
                 if (ret == -EPIPE || ret == -ECONNRESET)
                 {
-                    SYSDBG(strerror(-ret));
+                    LOGDBG(strerror(-ret));
                 }
                 else
                 {
-                    SYSERR(strerror(-ret));
+                    LOGERR(strerror(-ret));
                 }
                 co_return false;
             }
@@ -437,16 +437,6 @@ uco::task<bool> HttpConnection::Process()
         co_return true;
     }
 
-    // url_decode body if necessary.
-    if (m_httpRequest.m_sContentType == "application/x-www-form-urlencoded")
-    {
-        auto tmp = std::string(m_httpRequest.m_buffer.CurReadPos(),
-                               m_httpRequest.m_buffer.CurReadPos() +
-                                   m_httpRequest.m_iHttpRequsetContentLength);
-        m_httpRequest.m_buffer.RetriveAll();
-        m_httpRequest.m_buffer.Append(url_decode(tmp));
-    }
-
     // Process /search?q=golang&page=2.
     std::string sDecodePathWithoutQuery;
     std::unordered_map<std::string, std::string> mapQueryParams;
@@ -470,7 +460,26 @@ uco::task<bool> HttpConnection::Process()
     {
         HttpContext ctx(&m_httpRequest, &m_httpResponse, handles, params,
                         mapQueryParams);
-        co_await ctx.Next();
+        try
+        {
+            co_await ctx.Next();
+        }
+        catch (const HttpException &e)
+        {
+            LOGMSG("Exception:", e.code(), e.what());
+        }
+        catch (const std::exception &e)
+        {
+            LOGERR("unhandled exception:", e.what());
+            m_httpResponse.SetKeepAlive(false);
+            m_httpResponse.ShouldGenErrorPage(500);
+        }
+        catch (...)
+        {
+            LOGERR("unknown exception");
+            m_httpResponse.SetKeepAlive(false);
+            m_httpResponse.ShouldGenErrorPage(500);
+        }
     }
     else
     {

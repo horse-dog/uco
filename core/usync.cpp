@@ -2,6 +2,7 @@
 #include <thread>
 #include "usync.h"
 #include "uco.h"
+#include "uio.h"
 #include "ulog.h"
 #include <atomic>
 #include <cassert>
@@ -9,6 +10,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <emmintrin.h>
+#include <liburing.h>
+#include <sstream>
 #include <sys/eventfd.h>
 #include <unordered_set>
 
@@ -730,6 +733,115 @@ void uthread::daemonize()
     uthreads_list.push_back(_Mp_thread);
     uthread_list_mtx.unlock();
     _Mp_thread = nullptr;
+}
+
+// ==================== utimer (单线程模型) ====================
+
+#define UT_WAIT_SQE_LIST                                                       \
+    ((uco::__inner__::uco_linked_list *)(UCOENV.wait_sqe_list))
+
+/**
+ * @brief 内层睡眠协程: 提交 io_uring timeout, user_data = 协程句柄.
+ * @note 必须为 task<int>: errno 语义经 promise value 保真传递
+ *       (task<bool> 的 set_value(-EAGAIN) 会把非零压成 true).
+ * @note friend of utimer: 登记/解除 sleeper 句柄.
+ */
+task<int> utimer_raw_sleep(utimer *t, int64_t ns)
+{
+    uco_time_t ts{};
+    ts.tv_sec = ns / 1'000'000'000LL;
+    ts.tv_nsec = ns % 1'000'000'000LL;
+
+    struct awaitable
+    {
+        utimer *t;
+        uco_time_t ts;
+        task<int>::promise_type *p = nullptr;
+
+        bool await_ready() const noexcept { return false; }
+
+        bool await_suspend(task<int>::coro_handle h) noexcept
+        {
+            p = &h.promise();
+            if (ts.tv_sec < 0 || (ts.tv_sec == 0 && ts.tv_nsec <= 0))
+            {
+                return false; // 零时长: 不提交, 立即视为睡满.
+            }
+            auto sqe = UCOENV.get_sqe();
+            if (sqe == nullptr)
+            { // SQ 满: 挂起, 由调度器稍后重试本协程.
+                p->set_value(-EAGAIN);
+                UT_WAIT_SQE_LIST->push((task<void>::promise_type *)p);
+                return true;
+            }
+            io_uring_prep_timeout(sqe, &ts, 0, 0);
+            sqe->user_data = (uint64_t)(h.address());
+            t->sleeping_handle_ = h.address(); // 提交成功才登记.
+            return true;
+        }
+
+        int await_resume() noexcept
+        {
+            t->sleeping_handle_ = nullptr; // 先解除登记, 防悬垂.
+            return (int)p->value();
+        }
+    };
+
+    int res = 0;
+    do
+    {
+        res = co_await awaitable{t, ts};
+    } while (res == -EAGAIN); // SQ 满重试.
+    co_return res;
+}
+
+void utimer::wake()
+{
+    if (owner_tid_ != std::this_thread::get_id())
+    { // 跨线程: 拒绝, 避免数据竞争与 cancel 提交到错误 ring.
+        thread_violation("wake");
+        return;
+    }
+    if (sleeping_handle_ != nullptr)
+    { // sleeper 挂起中 (句柄必然有效): 提交取消.
+        auto sqe = UCOENV.get_sqe();
+        if (sqe == nullptr)
+        { // SQ 满: 丢弃本次取消, sleeper 睡满自然醒.
+            SYSWRN("utimer: wake dropped, io_uring sqe exhausted");
+            return;
+        }
+        io_uring_prep_cancel64(sqe, (uint64_t)sleeping_handle_, 0);
+        sqe->user_data = 0; // cancel 自身的 cqe 无需唤醒协程.
+        return;
+    }
+    wake_requested_ = true; // 无睡眠进行中: 记待处理请求.
+}
+
+bool utimer::take_pending(std::chrono::nanoseconds &d)
+{
+    if (owner_tid_ != std::this_thread::get_id())
+    {
+        thread_violation("take_pending");
+        return false;
+    }
+    if (!has_pending_)
+    {
+        return false;
+    }
+    has_pending_ = false;
+    d = std::chrono::nanoseconds(pend_ns_);
+    return true;
+}
+
+/// 跨线程调用: 记录违规并拒绝执行 (调用方自然降级).
+void utimer::thread_violation(const char *op) const
+{
+    std::ostringstream expect, actual;
+    expect << owner_tid_;
+    actual << std::this_thread::get_id();
+    SYSERR("utimer: single-thread contract violated, op:", op,
+           "owner thread:", expect.str(),
+           "caller thread:", actual.str());
 }
 
 } // namespace uco

@@ -1,6 +1,8 @@
 #pragma once
 #include "uco.h"
+#include <chrono>
 #include <cstdio>
+#include <memory>
 #include <optional>
 #include <thread>
 #include <utility>
@@ -317,6 +319,122 @@ class usema
     std::atomic<size_t> count;
 };
 
+/**
+ * @brief 可取消 / 可更新的 io_uring 定时睡眠 (单线程模型).
+ *
+ * 协程睡在 io_uring timeout 上时, 外界无法及时唤醒它, 只能靠短间隔
+ * 轮询标志位. 本类通过 IORING_OP_ASYNC_CANCEL (与 timeout 同一
+ * user_data) 实现 "睡眠 / 取消 / 更新", 消除轮询.
+ *
+ * @note 线程约束: 所有接口仅可在 utimer 所在线程调用, 入口有运行时
+ *       检查; 跨线程调用记 SYSERR 并拒绝, sleeper 睡满自然醒
+ *       (安全降级, 避免数据竞争).
+ * @note 唤醒为提示性 (类似条件变量): wake() 时若无睡眠进行中,
+ *       记为待处理请求, 下一次睡眠立即返回 false, 不丢失唤醒.
+ * @note 析构时须无挂起的睡眠 (由调用方结构保证, 如协程帧持有
+ *       外层 state 的 shared_ptr).
+ * @note sleep_until 内部换算为剩余时长走相对 timeout (不用
+ *       IORING_TIMEOUT_ABS: 需 5.15+ 且固定 CLOCK_REALTIME);
+ *       被 wake 打断后以原时刻重睡会重新换算, 无漂移.
+ */
+class utimer
+{
+  public:
+    utimer() : owner_tid_(std::this_thread::get_id()) {}
+    ~utimer() = default;
+
+    utimer(const utimer &) = delete;
+    utimer &operator=(const utimer &) = delete;
+
+    /**
+     * @brief 睡眠指定时长.
+     * @param d 时长, 任意 chrono duration; <= 0 视为已睡满.
+     * @return true 睡满; false 被 wake()/update() 打断.
+     */
+    template <typename Rep, typename Period>
+    task<bool> sleep_for(const std::chrono::duration<Rep, Period> &d)
+    {
+        if (owner_tid_ != std::this_thread::get_id())
+        {
+            thread_violation("sleep_for");
+            co_return false;
+        }
+        if (wake_requested_)
+        {
+            wake_requested_ = false;
+            co_return false;
+        }
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+        if (ns <= 0)
+        {
+            co_return true;
+        }
+        int res = co_await utimer_raw_sleep(this, ns);
+        co_return (res == -ETIME); // 到期 -ETIME, 被取消 -ECANCELED.
+    }
+
+    /**
+     * @brief 睡眠到指定时刻.
+     * @param tp 目标时刻, 任意 Clock 的 time_point; 已过则立即返回.
+     * @return true 到达目标时刻; false 被 wake()/update() 打断.
+     */
+    template <typename Clock, typename Duration>
+    task<bool> sleep_until(
+        const std::chrono::time_point<Clock, Duration> &tp)
+    {
+        auto now = Clock::now();
+        if (now >= tp)
+        {
+            co_return true;
+        }
+        co_return co_await sleep_for(tp - now);
+    }
+
+    /**
+     * @brief 打断当前睡眠 (提示性, 见类注释).
+     */
+    void wake();
+
+    /**
+     * @brief 打断当前睡眠并捎带新时长.
+     *        sleeper 醒后经 take_pending() 读取并以新时长重睡.
+     * @param d 新时长, 任意 chrono duration.
+     */
+    template <typename Rep, typename Period>
+    void update(const std::chrono::duration<Rep, Period> &d)
+    {
+        if (owner_tid_ != std::this_thread::get_id())
+        {
+            thread_violation("update");
+            return;
+        }
+        has_pending_ = true;
+        pend_ns_ =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+        wake();
+    }
+
+    /**
+     * @brief 读取并清除 update() 捎带的时长.
+     * @param d [out] 输出新时长.
+     * @return true 有 pending; false 无.
+     */
+    bool take_pending(std::chrono::nanoseconds &d);
+
+  private:
+    friend task<int> utimer_raw_sleep(utimer *, int64_t ns);
+
+    /// 跨线程调用检测: 记 SYSERR (接口名/期望线程/实际线程).
+    void thread_violation(const char *op) const;
+
+    std::thread::id owner_tid_;       ///< 构造线程 = 唯一合法调用线程.
+    void *sleeping_handle_ = nullptr; ///< 挂起中 sleeper 句柄 (cancel 目标).
+    bool wake_requested_ = false;     ///< 醒着时收到的唤醒请求, 下次睡眠即醒.
+    bool has_pending_ = false;        ///< update 捎带的新时长有效位.
+    int64_t pend_ns_ = 0;             ///< update 捎带的新时长 (纳秒).
+};
+
 template <typename _Tp, int Size=0> class uchan
 {
   public:
@@ -362,7 +480,7 @@ template <typename _Tp, int Size=0> class uchan
         co_await _M_lock.lock();
         if (_M_items.empty())
         {
-            SYSDBG("%d", _M_closed.load());
+            FRAMEWORK_DBG("%d", _M_closed.load());
             _M_lock.unlock();
             co_return false;
         }
@@ -445,7 +563,7 @@ template <typename _Tp> class uchan<_Tp, 0>
         co_await _M_lock.lock();
         if (!_M_slot.has_value())
         {
-            SYSDBG("%d", _M_closed.load());
+            FRAMEWORK_DBG("%d", _M_closed.load());
             _M_lock.unlock();
             co_return false;
         }

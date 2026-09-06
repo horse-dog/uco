@@ -66,12 +66,12 @@ static uco_time_t advance_ts(uco_time_t ts, int64_t ns)
     {                                                                          \
         auto await_ready() const noexcept                                      \
         {                                                                      \
-            SYSDBG("await_ready ? false");                                     \
+            FRAMEWORK_DBG("await_ready ? false");                              \
             return false;                                                      \
         }                                                                      \
         auto await_suspend(uco::task<retType>::coro_handle h) noexcept         \
         {                                                                      \
-            SYSDBG("await_suspend:", #op, ',', "handle:", h.address());        \
+            FRAMEWORK_DBG("await_suspend:", #op, ',', "handle:", h.address()); \
             auto &&p = h.promise();                                            \
             this->p = &p;                                                      \
             auto sqe = UCOENV.get_sqe();                                       \
@@ -90,7 +90,7 @@ static uco_time_t advance_ts(uco_time_t ts, int64_t ns)
         }                                                                      \
         auto await_resume() noexcept                                           \
         {                                                                      \
-            SYSDBG("await_resume:", #op);                                      \
+            FRAMEWORK_DBG("await_resume:", #op);                               \
             return p->value();                                                 \
         }
 
@@ -99,12 +99,12 @@ static uco_time_t advance_ts(uco_time_t ts, int64_t ns)
     {                                                                          \
         auto await_ready() const noexcept                                      \
         {                                                                      \
-            SYSDBG("await_ready ? false");                                     \
+            FRAMEWORK_DBG("await_ready ? false");                              \
             return false;                                                      \
         }                                                                      \
         auto await_suspend(uco::task<retType>::coro_handle h) noexcept         \
         {                                                                      \
-            SYSDBG("await_suspend:", #op, ',', "handle:", h.address());        \
+            FRAMEWORK_DBG("await_suspend:", #op, ',', "handle:", h.address()); \
             auto &&p = h.promise();                                            \
             this->p = &p;                                                      \
             auto sqe = UCOENV.get_sqe();                                       \
@@ -123,7 +123,7 @@ static uco_time_t advance_ts(uco_time_t ts, int64_t ns)
         }                                                                      \
         auto await_resume() noexcept                                           \
         {                                                                      \
-            SYSDBG("await_resume:", #op);                                      \
+            FRAMEWORK_DBG("await_resume:", #op);                               \
             return p->value();                                                 \
         }
 
@@ -147,7 +147,7 @@ static uco_time_t advance_ts(uco_time_t ts, int64_t ns)
                 ts = advance_ts(ts, dr);                                       \
                 if (ts.tv_sec == 0 && ts.tv_nsec == 0)                         \
                 {                                                              \
-                    SYSERR("timeout");                                         \
+                    SYSWRN("timeout");                                         \
                     res = -ETIME;                                              \
                     break;                                                     \
                 }                                                              \
@@ -179,7 +179,7 @@ static uco_time_t advance_ts(uco_time_t ts, int64_t ns)
                 ts = advance_ts(ts, dr);                                       \
                 if (ts.tv_sec == 0 && ts.tv_nsec == 0)                         \
                 {                                                              \
-                    SYSERR("timeout");                                         \
+                    SYSWRN("timeout");                                         \
                     res = -ETIME;                                              \
                     break;                                                     \
                 }                                                              \
@@ -390,12 +390,12 @@ static uco::task<void> __unanosleep(uco_time_t ts)
     {
         auto await_ready() const noexcept
         {
-            SYSDBG("await_ready ? false");
+            FRAMEWORK_DBG("await_ready ? false");
             return false;
         }
         auto await_suspend(uco::task<void>::coro_handle h) noexcept
         {
-            SYSDBG("await_suspend, handle:", h.address());
+            FRAMEWORK_DBG("await_suspend, handle:", h.address());
             auto &&p = h.promise();
             this->p = &p;
             if (ts.tv_sec < 0 || (ts.tv_sec == 0 && ts.tv_nsec <= 0))
@@ -408,7 +408,7 @@ static uco::task<void> __unanosleep(uco_time_t ts)
         }
         auto await_resume() noexcept
         {
-            SYSDBG("await_resume");
+            FRAMEWORK_DBG("await_resume");
             return p->value();
         }
         UR_FUNC_POST_COMM2(void);
@@ -429,12 +429,12 @@ uco::task<ssize_t> usendfile(int out_fd, int in_fd, off_t *offset, size_t count,
     {
         auto await_ready() const noexcept
         {
-            SYSDBG("await_ready ? false");
+            FRAMEWORK_DBG("await_ready ? false");
             return false;
         }
         auto await_suspend(uco::task<ssize_t>::coro_handle h) noexcept
         {
-            SYSDBG("await_suspend, handle:", h.address());
+            FRAMEWORK_DBG("await_suspend, handle:", h.address());
             auto &&p = h.promise();
             this->p = &p;
             auto sqe = thread_co_env::GetInstance().get_sqe();
@@ -454,7 +454,7 @@ uco::task<ssize_t> usendfile(int out_fd, int in_fd, off_t *offset, size_t count,
         }
         auto await_resume() noexcept
         {
-            SYSDBG("await_resume");
+            FRAMEWORK_DBG("await_resume");
             return p->value();
         }
 
@@ -470,12 +470,12 @@ uco::task<ssize_t> usendfile(int out_fd, int in_fd, off_t *offset, size_t count,
     {
         auto await_ready() const noexcept
         {
-            SYSDBG("await_ready ? false");
+            FRAMEWORK_DBG("await_ready ? false");
             return false;
         }
         auto await_suspend(uco::task<ssize_t>::coro_handle h) noexcept
         {
-            SYSDBG("await_suspend, handle:", h.address());
+            FRAMEWORK_DBG("await_suspend, handle:", h.address());
             auto &&p = h.promise();
             this->p = &p;
             auto sqe = thread_co_env::GetInstance().get_sqe();
@@ -495,7 +495,7 @@ uco::task<ssize_t> usendfile(int out_fd, int in_fd, off_t *offset, size_t count,
         }
         auto await_resume() noexcept
         {
-            SYSDBG("await_resume");
+            FRAMEWORK_DBG("await_resume");
             return p->value();
         }
 
@@ -547,8 +547,8 @@ uco::task<ssize_t> usendfile(int out_fd, int in_fd, off_t *offset, size_t count,
                     if (ts.tv_sec == 0 && ts.tv_nsec == 0)
                     { // already timeout.
                         errno = ETIME;
-                        co_await uclose(pipefd[0]);
-                        co_await uclose(pipefd[1]);
+                        close(pipefd[0]);
+                        close(pipefd[1]);
                         co_return (cur != 0) ? cur : -ETIME;
                     }
                 }
@@ -559,15 +559,15 @@ uco::task<ssize_t> usendfile(int out_fd, int in_fd, off_t *offset, size_t count,
         } while (m == -EAGAIN || m == -EINTR);
         if (m == 0)
         {
-            co_await uclose(pipefd[0]);
-            co_await uclose(pipefd[1]);
+            close(pipefd[0]);
+            close(pipefd[1]);
             co_return cur;
         }
         if (m < 0)
         {
             SYSERR("splice in_fd(", in_fd ,") -> pipe[1]:", strerror(-m));
-            co_await uclose(pipefd[0]);
-            co_await uclose(pipefd[1]);
+            close(pipefd[0]);
+            close(pipefd[1]);
             errno = (-m);
             co_return (cur != 0) ? cur : m;
         }
@@ -586,8 +586,8 @@ uco::task<ssize_t> usendfile(int out_fd, int in_fd, off_t *offset, size_t count,
                     if (ts.tv_sec == 0 && ts.tv_nsec == 0)
                     { // already timeout.
                         errno = ETIME;
-                        co_await uclose(pipefd[0]);
-                        co_await uclose(pipefd[1]);
+                        close(pipefd[0]);
+                        close(pipefd[1]);
                         co_return (cur != 0) ? cur : -ETIME;
                     }
                     tpoint = steady_clock::now();
@@ -596,8 +596,8 @@ uco::task<ssize_t> usendfile(int out_fd, int in_fd, off_t *offset, size_t count,
             } while (k == -EAGAIN || k == -EINTR);
             if (k == 0)
             {
-                co_await uclose(pipefd[0]);
-                co_await uclose(pipefd[1]);
+                close(pipefd[0]);
+                close(pipefd[1]);
                 co_return cur;
             }
             if (k < 0)
@@ -605,16 +605,16 @@ uco::task<ssize_t> usendfile(int out_fd, int in_fd, off_t *offset, size_t count,
                 // EPIPE means client closed.
                 if (k == -EPIPE || k == -ECONNRESET)
                 {
-                    SYSDBG("splice pipe[0] -> out_fd:", out_fd, strerror(-k), ',',
-                            NR(cur), NR(m), NR(k));
+                    FRAMEWORK_DBG("splice pipe[0] -> out_fd:", out_fd, strerror(-k), ',',
+                                   NR(cur), NR(m), NR(k));
                 }
                 else
                 {
                     SYSERR("splice pipe[0] -> out_fd:", out_fd, strerror(-k), ',',
                             NR(cur), NR(m), NR(k));
                 }
-                co_await uclose(pipefd[0]);
-                co_await uclose(pipefd[1]);
+                close(pipefd[0]);
+                close(pipefd[1]);
                 errno = (-k);
                 co_return (cur != 0) ? cur : k;
             }
@@ -625,8 +625,8 @@ uco::task<ssize_t> usendfile(int out_fd, int in_fd, off_t *offset, size_t count,
         remain -= m;
     }
 
-    co_await uclose(pipefd[0]);
-    co_await uclose(pipefd[1]);
+    close(pipefd[0]);
+    close(pipefd[1]);
     co_return cur;
 }
 

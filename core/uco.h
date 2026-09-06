@@ -1,5 +1,6 @@
 #pragma once
 
+#include "umacro.h"
 #include "ulog.h"
 #include <coroutine>
 #include <exception>
@@ -13,6 +14,12 @@ using i32 = int;
 using u32 = unsigned int;
 using i64 = int64_t;
 using u64 = uint64_t;
+
+#if USE_FRAMEWORK_DBG
+#define FRAMEWORK_DBG SYSDBG
+#else
+#define FRAMEWORK_DBG(...)
+#endif
 
 namespace uco
 {
@@ -32,6 +39,9 @@ template <class _Tp> struct [[nodiscard("coroutine")]] task
     {
         using coro_handle = std::coroutine_handle<promise_type>;
 
+        // 显式声明构造函数以禁用聚合初始化，避免协程参数被误初始化到 caller。
+        promise_type() noexcept = default;
+
         void *caller = nullptr; // caller coroutine handle addr.
         void *next = nullptr;   // next coroutine promise addr.
         u64 tid = 0;
@@ -42,7 +52,7 @@ template <class _Tp> struct [[nodiscard("coroutine")]] task
         // set_value used in scheduler, return_value used in coroutine.
         void set_value(_Tp &&value) noexcept
         {
-            SYSDBG("set_value");
+            FRAMEWORK_DBG("set_value");
             new (&value_buf) _Tp(std::forward<_Tp>(value));
         }
 
@@ -68,19 +78,19 @@ template <class _Tp> struct [[nodiscard("coroutine")]] task
         // set_value used in scheduler, return_value used in coroutine.
         template <class _Up> void return_value(_Up &&value) noexcept
         {
-            SYSDBG("return_value");
+            FRAMEWORK_DBG("return_value");
             new (&value_buf) _Tp(std::forward<_Up>(value));
         }
 
         void unhandled_exception() noexcept
         {
-            SYSDBG("exception");
+            FRAMEWORK_DBG("exception");
             error = std::current_exception();
         }
 
         template <class _Up> auto await_transform(_Up &&task) noexcept
         {
-            SYSDBG("await_transform (_Up&&)");
+            FRAMEWORK_DBG("await_transform (_Up&&)");
             return std::forward<_Up>(task);
         }
 
@@ -124,7 +134,7 @@ template <class _Tp> struct [[nodiscard("coroutine")]] task
 
     explicit task(coro_handle handle) noexcept : m_handle(handle)
     {
-        SYSDBG("task ctor, handle:", m_handle.address());
+        FRAMEWORK_DBG("task ctor, handle:", m_handle.address());
     }
 
     ~task()
@@ -154,14 +164,14 @@ struct task_awaiter
 
     bool await_ready() noexcept
     {
-        SYSDBG("handle:", m_handle.address());
+        FRAMEWORK_DBG("handle:", m_handle.address());
         if (m_handle != nullptr) [[likely]]
         {
-            SYSDBG("resume handle", m_handle.address(), "begin");
+            FRAMEWORK_DBG("resume handle", m_handle.address(), "begin");
             m_handle.promise().caller = (void *)1;
             m_handle.resume();
-            SYSDBG("resume handle", m_handle.address(), "end");
-            SYSDBG(NR(m_handle.done()));
+            FRAMEWORK_DBG("resume handle", m_handle.address(), "end");
+            FRAMEWORK_DBG(NR(m_handle.done()));
         }
         else
         {
@@ -172,22 +182,28 @@ struct task_awaiter
 
     void await_suspend(std::coroutine_handle<> caller) noexcept
     {
-        SYSDBG("handle:", m_handle.address(), ',', "caller:", caller.address());
+        FRAMEWORK_DBG("handle:", m_handle.address(), ',', "caller:", caller.address());
         m_handle.promise().caller = caller.address();
     }
 
     _Tp await_resume()
     {
-        SYSDBG("handle:", m_handle.address());
+        // value_buf 在协程帧内，必须在 destroy 前移出；这里要求移动构造不抛，
+        // 否则 destroy 会被跳过导致协程帧泄漏。
+        static_assert(std::is_nothrow_move_constructible_v<_Tp>,
+                      "uco::task<T> requires T to be nothrow move constructible");
+        FRAMEWORK_DBG("handle:", m_handle.address());
         auto err = m_handle.promise().error;
-        auto val = std::move(m_handle.promise().value());
-        SYSDBG("destory handle", m_handle.address());
-        m_handle.destroy();
         if (err) [[unlikely]]
         {
-            SYSDBG("rethrow exception");
+            FRAMEWORK_DBG("destory handle", m_handle.address());
+            m_handle.destroy();
+            FRAMEWORK_DBG("rethrow exception");
             std::rethrow_exception(err);
         }
+        auto val = std::move(m_handle.promise().value());
+        FRAMEWORK_DBG("destory handle", m_handle.address());
+        m_handle.destroy();
         return val;
     }
 
@@ -209,6 +225,9 @@ template <> struct [[nodiscard("coroutine")]] task<void>
     {
         using coro_handle = std::coroutine_handle<promise_type>;
 
+        // 显式声明构造函数以禁用聚合初始化，避免协程参数被误初始化到 caller。
+        promise_type() noexcept = default;
+
         void *caller = nullptr; // caller coroutine handle addr.
         void *next = nullptr;   // next coroutine promise addr.
         u64 tid = 0;
@@ -217,7 +236,7 @@ template <> struct [[nodiscard("coroutine")]] task<void>
 
         void set_value(u64 value) noexcept
         {
-            SYSDBG("set_value");
+            FRAMEWORK_DBG("set_value");
             value_buf = value;
         }
 
@@ -232,17 +251,17 @@ template <> struct [[nodiscard("coroutine")]] task<void>
 
         inline auto final_suspend() noexcept -> __inner__::suspend_conditional;
 
-        void return_void() noexcept { SYSDBG("return_void"); }
+        void return_void() noexcept { FRAMEWORK_DBG("return_void"); }
 
         void unhandled_exception() noexcept
         {
-            SYSDBG("exception");
+            FRAMEWORK_DBG("exception");
             error = std::current_exception();
         }
 
         template <class _Up> auto await_transform(_Up &&task) noexcept
         {
-            SYSDBG("await_transform (_Up&&)");
+            FRAMEWORK_DBG("await_transform (_Up&&)");
             return std::forward<_Up>(task);
         }
 
@@ -286,7 +305,7 @@ template <> struct [[nodiscard("coroutine")]] task<void>
 
     explicit task(coro_handle handle) noexcept : m_handle(handle)
     {
-        SYSDBG("task ctor, handle:", m_handle.address());
+        FRAMEWORK_DBG("task ctor, handle:", m_handle.address());
     }
 
     ~task()
@@ -315,14 +334,14 @@ struct task_awaiter<void>
 
     bool await_ready() noexcept
     {
-        SYSDBG("handle:", m_handle.address());
+        FRAMEWORK_DBG("handle:", m_handle.address());
         if (m_handle != nullptr) [[likely]]
         {
-            SYSDBG("resume handle", m_handle.address(), "begin");
+            FRAMEWORK_DBG("resume handle", m_handle.address(), "begin");
             m_handle.promise().caller = (void *)1;
             m_handle.resume();
-            SYSDBG("resume handle %p end", m_handle.address());
-            SYSDBG(NR(m_handle.done()));
+            FRAMEWORK_DBG("resume handle %p end", m_handle.address());
+            FRAMEWORK_DBG(NR(m_handle.done()));
         }
         else
         {
@@ -333,19 +352,19 @@ struct task_awaiter<void>
 
     void await_suspend(std::coroutine_handle<> caller) noexcept
     {
-        SYSDBG("handle:", m_handle.address(), ',', "caller:", caller.address());
+        FRAMEWORK_DBG("handle:", m_handle.address(), ',', "caller:", caller.address());
         m_handle.promise().caller = caller.address();
     }
 
     void await_resume()
     {
-        SYSDBG("handle:", m_handle.address());
+        FRAMEWORK_DBG("handle:", m_handle.address());
         auto err = m_handle.promise().error;
-        SYSDBG("destory handle", m_handle.address());
+        FRAMEWORK_DBG("destory handle", m_handle.address());
         m_handle.destroy();
         if (err) [[unlikely]]
         {
-            SYSDBG("rethrow exception");
+            FRAMEWORK_DBG("rethrow exception");
             std::rethrow_exception(err);
         }
     }
@@ -405,7 +424,7 @@ struct __go__
 {
     template <class _Tp> inline void operator-(uco::task<_Tp> &&task)
     {
-        SYSDBG("go coroutine:", task.m_handle.address());
+        FRAMEWORK_DBG("go coroutine:", task.m_handle.address());
         task.m_handle.resume();
         task.m_handle = nullptr;
     }
@@ -445,13 +464,13 @@ struct uco_linked_list
 template <class _Tp>
 auto task<_Tp>::promise_type::initial_suspend() noexcept -> std::suspend_always
 {
-    SYSDBG("initial_suspend");
+    FRAMEWORK_DBG("initial_suspend");
     return std::suspend_always();
 }
 
 auto task<void>::promise_type::initial_suspend() noexcept -> std::suspend_always
 {
-    SYSDBG("initial_suspend");
+    FRAMEWORK_DBG("initial_suspend");
     return std::suspend_always();
 }
 
@@ -459,11 +478,33 @@ template <class _Tp>
 auto task<_Tp>::promise_type::final_suspend() noexcept
     -> __inner__::suspend_conditional
 {
-    SYSDBG("final_suspend");
+    FRAMEWORK_DBG("final_suspend");
+    // 根协程（go 启动、无人 await）带着未处理异常结束：
+    // 不会再有任何 await 方重抛这个异常，它将随协程帧一起无声消失。
+    // 与 std::thread 顶层未捕获异常语义对齐：记录后终止进程（fail-fast）。
+    // 定义 UCO_TOLERATE_ROOT_EXCEPTIONS 可退回"仅记日志，不终止"。
+    if (caller == nullptr && error) [[unlikely]]
+    {
+        try
+        {
+            std::rethrow_exception(error);
+        }
+        catch (const std::exception &e)
+        {
+            SYSERR("root coroutine died with unhandled exception:", e.what());
+        }
+        catch (...)
+        {
+            SYSERR("root coroutine died with unknown exception");
+        }
+#if !UCO_TOLERATE_ROOT_EXCEPTIONS
+        std::terminate(); // SIGABRT，配合 ulimit -c unlimited 生成 core
+#endif
+    }
     bool suspend = (caller != nullptr);
     if (caller != nullptr)
     {
-        SYSDBG("caller:", caller);
+        FRAMEWORK_DBG("caller:", caller);
         caller = nullptr;
     }
     return __inner__::suspend_conditional(suspend);
@@ -472,11 +513,31 @@ auto task<_Tp>::promise_type::final_suspend() noexcept
 auto task<void>::promise_type::final_suspend() noexcept
     -> __inner__::suspend_conditional
 {
-    SYSDBG("final_suspend");
+    FRAMEWORK_DBG("final_suspend");
+    // 同 task<_Tp>::promise_type::final_suspend：根协程未捕获异常，
+    // 无人会再消费，最后的机会在这里报告并 fail-fast。
+    if (caller == nullptr && error) [[unlikely]]
+    {
+        try
+        {
+            std::rethrow_exception(error);
+        }
+        catch (const std::exception &e)
+        {
+            SYSERR("root coroutine died with unhandled exception:", e.what());
+        }
+        catch (...)
+        {
+            SYSERR("root coroutine died with unknown exception");
+        }
+#if !UCO_TOLERATE_ROOT_EXCEPTIONS
+        std::terminate(); // SIGABRT，配合 ulimit -c unlimited 生成 core
+#endif
+    }
     bool suspend = (caller != nullptr);
     if (caller != nullptr)
     {
-        SYSDBG("caller:", caller);
+        FRAMEWORK_DBG("caller:", caller);
         caller = nullptr;
     }
     return __inner__::suspend_conditional(suspend);
@@ -486,14 +547,14 @@ template <class _Tp>
 auto task<_Tp>::promise_type::await_transform(std::suspend_always task) noexcept
     -> __inner__::suspend_always
 {
-    SYSDBG("await_transform (std::suspend_always)");
+    FRAMEWORK_DBG("await_transform (std::suspend_always)");
     return __inner__::suspend_always();
 }
 
 auto task<void>::promise_type::await_transform(
     std::suspend_always task) noexcept -> __inner__::suspend_always
 {
-    SYSDBG("await_transform (std::suspend_always)");
+    FRAMEWORK_DBG("await_transform (std::suspend_always)");
     return __inner__::suspend_always();
 }
 } // namespace uco

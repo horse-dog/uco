@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
-#include <cstdint>
 #include <cstdio>
 #include <sstream>
 #include <string>
@@ -18,6 +17,9 @@
 #include "uco.h"
 #include "uio.h"
 #include "ulog.h"
+#include "uredis.h"
+#include "usql.h"
+#include "string_utils.h"
 
 HttpContext::HttpContext(
     HttpRequest *ptrReq, HttpResponse *ptrRsp,
@@ -34,7 +36,7 @@ std::string HttpContext::GetRequestUrl() const { return m_ptrReq->m_sPath; }
 #define CHECK_HAS_SET_RSPCONTENT                                               \
     if (m_bHasSetRspContent)                                                   \
     {                                                                          \
-        SYSERR("already set responce body");                                   \
+        LOGERR("already set responce body");                                   \
         return;                                                                \
     }                                                                          \
     m_bHasSetRspContent = true
@@ -55,7 +57,7 @@ void HttpContext::Json(int httpRetCode,
         }
         else
         {
-            SYSERR("message: %s", message.ShortDebugString().c_str());
+            LOGERR("message: %s", message.ShortDebugString().c_str());
             m_ptrRsp->ShouldGenErrorPage(500);
         }
     }
@@ -98,8 +100,9 @@ void HttpContext::HTML(int httpRetCode, const std::string &templatePath,
 {
     if (!isTemplateHTML(templatePath))
     {
-        SYSFTL("%s not a template (*.html, *.tmpl, *.tpl)",
-               templatePath.c_str());
+        LOGERR(templatePath, "not a template (*.html, *.tmpl, *.tpl)");
+        Status(400);
+        Abort(400, "Not a template file");
     }
     if (m_ptrRsp)
     {
@@ -118,8 +121,9 @@ void HttpContext::HTML(int httpRetCode, const std::string &templatePath,
 {
     if (!isTemplateHTML(templatePath))
     {
-        SYSFTL("%s not a template (*.html, *.tmpl, *.tpl)",
-               templatePath.c_str());
+        LOGERR(templatePath, "not a template (*.html, *.tmpl, *.tpl)");
+        Status(400);
+        Abort(400, "Not a template file");
     }
     if (m_ptrRsp)
     {
@@ -137,7 +141,6 @@ void HttpContext::HTML(int httpRetCode, const std::string &templatePath,
 
         if (m_ptrRsp->m_protoTemplateArgs != nullptr)
         {
-            SYSERR("why here ?");
             delete m_ptrRsp->m_protoTemplateArgs;
         }
         m_ptrRsp->m_protoTemplateArgs = prototype->New();
@@ -170,24 +173,16 @@ void HttpContext::Status(int httpRetCode)
 {
     if (m_ptrRsp)
     {
-        CHECK_HAS_SET_RSPCONTENT;
         m_ptrRsp->m_iHttpRetCode = httpRetCode;
     }
 }
 
-void HttpContext::AbortWithStatus(int httpRetCode)
-{
-    Status(httpRetCode);
-    Abort();
-}
-
-void HttpContext::AbortWithStatusHtml(int httpRetCode)
+void HttpContext::GenErrorPage(int httpRetCode)
 {
     if (m_ptrRsp)
     {
         m_bHasSetRspContent = true;
         m_ptrRsp->ShouldGenErrorPage(httpRetCode);
-        Abort();
     }
 }
 
@@ -197,11 +192,11 @@ void HttpContext::Redirect(int httpRetCode, const std::string &location)
     {
         CHECK_HAS_SET_RSPCONTENT;
         m_ptrRsp->m_iHttpRetCode = httpRetCode;
-        Header("Location", location);
+        SetHeader("Location", location);
     }
 }
 
-void HttpContext::Header(const std::string &key, const std::string &value)
+void HttpContext::SetHeader(const std::string &key, const std::string &value)
 {
     if (m_ptrRsp)
     {
@@ -246,6 +241,59 @@ HttpContext::QueryAll() const
     return m_mapQueryParams;
 }
 
+std::string HttpContext::GetHeader(const std::string &key) const
+{
+    if (m_ptrReq == nullptr) return "";
+    for (const auto &[name, value] : m_ptrReq->m_mapHeader)
+    {
+        if (name.size() != key.size()) continue;
+        bool equal = true;
+        for (size_t i = 0; i < name.size(); ++i)
+        {
+            if (std::tolower(static_cast<unsigned char>(name[i])) !=
+                std::tolower(static_cast<unsigned char>(key[i])))
+            {
+                equal = false;
+                break;
+            }
+        }
+        if (equal) return value;
+    }
+    return "";
+}
+
+std::string HttpContext::GetCookie(const std::string& name) const
+{
+    if (name.empty()) return "";
+
+    const std::string header = GetHeader("Cookie");
+    std::string value;
+    bool found = false;
+    size_t begin = 0;
+    while (begin < header.size())
+    {
+        size_t end = header.find(';', begin);
+        if (end == std::string::npos) end = header.size();
+
+        std::string_view item(header.data() + begin, end - begin);
+        while (!item.empty() && (item.front() == ' ' || item.front() == '\t'))
+            item.remove_prefix(1);
+        while (!item.empty() && (item.back() == ' ' || item.back() == '\t'))
+            item.remove_suffix(1);
+
+        const size_t separator = item.find('=');
+        if (separator != std::string_view::npos &&
+            item.substr(0, separator) == name)
+        {
+            if (found) return "";
+            value.assign(item.substr(separator + 1));
+            found = true;
+        }
+        begin = end + 1;
+    }
+    return value;
+}
+
 std::string HttpContext::GetRawData()
 {
     std::string res;
@@ -276,17 +324,115 @@ std::string_view HttpContext::PeekRawData()
 
 bool HttpContext::ShouldBindJSON(google::protobuf::Message &message)
 {
-    if (m_ptrReq)
+    if (m_ptrReq == nullptr) return false;
+    const std::string_view body = PeekRawData();
+    if (body.empty())
     {
-        if (!JsonToMessage(PeekRawData(), message))
-        {
-            SYSERR(PeekRawData());
-            return false;
-        }
-        m_ptrReq->m_buffer.Retrieve(m_ptrReq->m_iHttpRequsetContentLength);
-        return true;
+        LOGERR("empty body");
+        return false;
     }
-    return false;
+    if (!JsonToMessage(body, message))
+    {
+        LOGERR("parse error", NR(body));
+        return false;
+    }
+    m_ptrReq->m_buffer.Retrieve(m_ptrReq->m_iHttpRequsetContentLength);
+    return true;
+}
+
+void HttpContext::BindJSON(google::protobuf::Message &message)
+{
+    if (!ShouldBindJSON(message))
+    {
+        Status(400);
+        Abort(400, "BindJSON");
+    }
+}
+
+bool decode_component(std::string_view value, std::string &result)
+{
+    result.clear();
+    result.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i)
+    {
+        if (value[i] == '+')
+        {
+            result.push_back(' ');
+        }
+        else if (value[i] == '%')
+        {
+            if (i + 2 >= value.size()) return false;
+            const int high = uco::CharToHex(value[i + 1]);
+            const int low = uco::CharToHex(value[i + 2]);
+            if (high < 0 || low < 0) return false;
+            result.push_back(static_cast<char>((high << 4) | low));
+            i += 2;
+        }
+        else
+        {
+            result.push_back(value[i]);
+        }
+    }
+    return true;
+}
+
+static bool parse_urlencoded(std::string_view body,
+    std::unordered_map<std::string, std::string> &fields)
+{
+    fields.clear();
+    size_t begin = 0;
+    while (begin < body.size())
+    {
+        size_t end = body.find('&', begin);
+        if (end == std::string_view::npos) end = body.size();
+        const std::string_view item = body.substr(begin, end - begin);
+        const size_t equal = item.find('=');
+        if (equal == std::string_view::npos) return false;
+
+        std::string key;
+        std::string value;
+        if (!decode_component(item.substr(0, equal), key) ||
+            !decode_component(item.substr(equal + 1), value) || key.empty() ||
+            !fields.emplace(std::move(key), std::move(value)).second)
+            return false;
+        begin = end + 1;
+    }
+    return !fields.empty();
+}
+
+bool HttpContext::ShouldBindForm(
+    std::unordered_map<std::string, std::string> &fields, size_t max_body_size)
+{
+    if (m_ptrReq == nullptr) return false;
+
+    const std::string_view body = PeekRawData();
+    if (body.empty())
+    {
+        LOGERR("empty body");
+        return false;
+    }
+    else if (body.size() > max_body_size)
+    {
+        LOGERR(body.size(), max_body_size);
+        return false;
+    }
+    if (!parse_urlencoded(body, fields))
+    {
+        LOGERR("parse error", NR(body));
+        return false;
+    }
+    m_ptrReq->m_buffer.Retrieve(m_ptrReq->m_iHttpRequsetContentLength);
+    return true;
+}
+
+void HttpContext::BindForm(std::unordered_map<std::string, std::string> &fields,
+                           size_t max_body_size)
+{
+    if (!ShouldBindForm(fields, max_body_size))
+    {
+        Status(400);
+        Abort(400, "BindForm");
+    }
 }
 
 uco::task<void> HttpContext::Next()
@@ -300,7 +446,10 @@ uco::task<void> HttpContext::Next()
     co_return;
 }
 
-void HttpContext::Abort() { m_iCurHandleIndex = INT32_MAX - 1; }
+void HttpContext::Abort(int httpRetCode, const std::string &msg)
+{
+    throw HttpException(httpRetCode, msg);
+}
 
 HttpServer::HttpServerInstance::~HttpServerInstance()
 {
@@ -539,6 +688,21 @@ void HttpServer::Init(int port, int num_threads, int keepalivecnt,
 
 void HttpServer::Run()
 {
+    // TODO: 放这里不太好.
+    {
+        usql::upool::config mysql;
+        mysql.host = "127.0.0.1";
+        mysql.user = "root";
+        mysql.pass = "123456";
+        mysql.db = "webserver";
+        mysql.max_size = 16;
+        usql::upool::GetInstance(mysql);
+
+        uredis::upool::config redis;
+        redis.max_size = 16;
+        uredis::upool::GetInstance(redis);
+    }
+
     for (int i = 1; i < m_iNumThreads; i++)
     {
         m_vecThreads.emplace_back(
@@ -629,7 +793,6 @@ uco::task<void> HttpServer::peek_exit()
         if (siginfo.ssi_signo == SIGINT)
         {
             SYSMSG("Caught SIGINT signal");
-            eventfd_t inc = m_iNumThreads;
             for (int i = 0; i < m_iNumThreads; i++)
                 exit_sema.signal();
             break;
@@ -637,17 +800,20 @@ uco::task<void> HttpServer::peek_exit()
         else if (siginfo.ssi_signo == SIGTERM)
         {
             SYSMSG("Caught SIGTERM signal");
-            eventfd_t inc = m_iNumThreads;
             for (int i = 0; i < m_iNumThreads; i++)
                 exit_sema.signal();
             break;
         }
         else if (siginfo.ssi_signo == SIGPIPE)
         {
-            SYSDBG("ignore SIGPIPE");
+            LOGDBG("ignore SIGPIPE");
         }
-        SYSDBG("xread ret %zd", s);
+        LOGDBG("xread ret %zd", s);
     }
+
+    // TODO: 放这里貌似不太好.
+    usql::upool::GetInstance().close();
+    uredis::upool::GetInstance().close();
     co_return;
 }
 

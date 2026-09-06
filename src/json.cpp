@@ -10,7 +10,7 @@ bool MessageToJson(const google::protobuf::Message &message, std::string &json)
     auto ret = MessageToJsonString(message, &json);
     if (!ret.ok())
     {
-        SYSERR("message -> json failed, reason: %s, message: %s",
+        LOGERR("message -> json failed, reason: %s, message: %s",
                ret.message().data(), message.ShortDebugString().data());
     }
     return ret.ok();
@@ -22,7 +22,7 @@ bool JsonToMessage(const std::string &json, google::protobuf::Message &message)
     auto ret = JsonStringToMessage(json, &message);
     if (!ret.ok())
     {
-        SYSERR("json -> message failed, reason: %s, json: %s",
+        LOGERR("json -> message failed, reason: %s, json: %s",
                ret.message().data(), json.data());
     }
     return ret.ok();
@@ -34,7 +34,7 @@ bool JsonToMessage(std::string_view json, google::protobuf::Message &message)
     auto ret = JsonStringToMessage(json, &message);
     if (!ret.ok())
     {
-        SYSERR("json -> message failed, reason: %s, json: %s",
+        LOGERR("json -> message failed, reason: %s, json: %s",
                ret.message().data(), json.data());
     }
     return ret.ok();

@@ -22,7 +22,7 @@ task<void> echo(HttpContext *context)
 task<void> middleware1(HttpContext *context)
 {
     LOGDBG("before");
-    CTXNEXT(context);
+    co_await context->Next();
     LOGDBG("after");
     co_return;
 }
@@ -30,7 +30,7 @@ task<void> middleware1(HttpContext *context)
 task<void> middleware2(HttpContext *context)
 {
     LOGDBG("before");
-    CTXNEXT(context);
+    co_await context->Next();
     LOGDBG("after");
     co_return;
 }
@@ -88,7 +88,7 @@ task<void> head(HttpContext *context)
 task<void> post(HttpContext *context)
 {
     User user;
-    BindJSON(context, user);
+    context->BindJSON(user);
     LOGMSG(NR(user.username()));
     LOGMSG(NR(user));
     context->Json(200, user);
@@ -97,7 +97,7 @@ task<void> post(HttpContext *context)
 
 int main(int argc, const char *argv[])
 {
-    uco::OpenLog("ucohttpsvr", LogLevel::INFO, LogMode::FILE, true);
+    uco::OpenLog("ucohttpsvr", LogLevel::INFO, LogMode::CONSOLE, true);
     uco::InitProcess(false, "ucohttpsvr");
     httpserver.Static("/css/*");
     httpserver.Static("/fonts/*filename");

@@ -19,6 +19,9 @@
 #include "ulog.h"
 #include "usync.h"
 
+// http status code -> reason phrase (defined in httpresponce.cpp)
+extern std::unordered_map<int, std::string> httpRetCode2StatusString;
+
 class StaticResourcePool
 {
   public:
@@ -139,11 +142,7 @@ class HttpResponse
     bool IsKeepAlive() const { return m_bKeepAlive; }
     void Reset();
     void GenHttpHeader();
-    void ShouldGenErrorPage(int httpRetCode)
-    {
-        m_bShouldGenErrorPage = true;
-        m_iHttpRetCode = httpRetCode;
-    };
+    void ShouldGenErrorPage(int httpRetCode);
     uco::task<bool> GenHtmlTemplate(int fd, int size);
     uco::task<void> GenErrorPage(int httpRetCode, const std::string &fullpath);
     void GenErrorPageDefault(int httpRetCode);

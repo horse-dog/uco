@@ -132,7 +132,7 @@ struct sync_linked_list
 
 void suspend_always::await_suspend(std::coroutine_handle<> h) noexcept
 {
-    SYSDBG("await_suspend");
+    FRAMEWORK_DBG("await_suspend");
     auto ch = uco::task<void>::coro_handle::from_address(h.address());
     YIELD_LIST->push(&(ch.promise()));
 }
@@ -172,13 +172,13 @@ static void resume(void *ptr)
     {
         auto cur_co = uco::task<void>::coro_handle::from_address(pcur);
         auto caller = cur_co.promise().caller;
-        SYSDBG("caller:", caller, ',', "current:", pcur);
+        FRAMEWORK_DBG("caller:", caller, ',', "current:", pcur);
         cur_co.resume();
         if (caller)
         {
             if (caller != cur_co.promise().caller)
             {
-                SYSDBG("coroutine", pcur, "finished, caller:", caller);
+                FRAMEWORK_DBG("coroutine", pcur, "finished, caller:", caller);
                 if (caller == (void *)1) [[unlikely]]
                 {
                     SYSFTL(NR(pcur), "never yield and finish, why return here ? "
@@ -188,13 +188,13 @@ static void resume(void *ptr)
             }
             else
             {
-                SYSDBG("cur_co not finish, leave:", pcur);
+                FRAMEWORK_DBG("cur_co not finish, leave:", pcur);
                 pcur = nullptr;
             }
         }
         else
         {
-            SYSDBG("no caller, leave:", pcur);
+            FRAMEWORK_DBG("no caller, leave:", pcur);
             pcur = nullptr;
         }
     }
@@ -203,7 +203,7 @@ static void resume(void *ptr)
 thread_co_env::thread_co_env()
 {
     thread_id = gettid();
-    SYSMSG("construct thread_co_env:", thread_id);
+    FRAMEWORK_DBG("construct thread_co_env:", thread_id);
     sync_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     uring = new struct io_uring;
     if (io_uring_queue_init(8192, (struct io_uring*)uring, 0) < 0)
@@ -260,7 +260,7 @@ thread_co_env::~thread_co_env()
 
 void thread_co_env::schedule()
 {
-    SYSMSG("shceduler start");
+    FRAMEWORK_DBG("shceduler start");
     int retry_register_read_syncfd = 0;
     auto yield_co_list = (uco_linked_list *)yield_list;
     auto sqe_co_list = (uco_linked_list *)wait_sqe_list;
@@ -270,7 +270,7 @@ void thread_co_env::schedule()
         if (io_event_count == 0 && sync_event_count == 0 &&
             yield_co_list->empty() && sqe_co_list->empty())
         {
-            SYSMSG("shceduler exit");
+            FRAMEWORK_DBG("shceduler exit");
             break;
         }
 
@@ -316,12 +316,12 @@ void thread_co_env::schedule()
                 --io_event_count;
                 if (cqe->user_data == 0)
                 {
-                    SYSDBG("operate canceled");
+                    FRAMEWORK_DBG("operate canceled");
                     continue;
                 }
                 if (cqe->user_data == 1)
                 {
-                    SYSDBG("sync fd notify:", NR(thread_id), NR(sync_fd));
+                    FRAMEWORK_DBG("sync fd notify:", NR(thread_id), NR(sync_fd));
                     REGISTER_READ_SYNCFD(retry_register_read_syncfd);
                     ++io_event_count;
                     continue;
@@ -386,13 +386,13 @@ struct __uthread_guard
             for (auto pthread : tmp)
             {
                 auto id = pthread->get_id();
-                SYSDBG("join thead:", id, "begin");
+                FRAMEWORK_DBG("join thead:", id, "begin");
                 if (pthread->joinable())
                 {
                     pthread->join();
                 }
                 delete pthread;
-                SYSDBG("join thead:", id, "finish");
+                FRAMEWORK_DBG("join thead:", id, "finish");
             }
         }
     }

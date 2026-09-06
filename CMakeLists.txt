@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 find_package(Protobuf REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 file(GLOB_RECURSE PROTO_FILES "proto/*.proto")
 set(GENERATED_DIR ${CMAKE_CURRENT_SOURCE_DIR}/gen)
 file(MAKE_DIRECTORY ${GENERATED_DIR})
@@ -21,6 +22,7 @@ include_directories(
     ${GENERATED_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/utils
 )
 
 add_library(ulog core/ulogshm.cpp core/ulog.cpp)
@@ -34,8 +36,25 @@ add_library(
   core/uio.cpp
   core/usync.cpp
   core/udaemon.cpp
+  core/uredis.cpp
+  utils/string_utils.cpp
 )
-target_link_libraries(uco PRIVATE uhook)
+target_link_libraries(uco PRIVATE uhook PUBLIC OpenSSL::Crypto)
+
+# ---- usql: 基于 io_uring + 协程的异步 MySQL 支持 (可选, 自动检测) ----
+option(USE_MYSQL "Enable usql (async MySQL C API support)" ON)
+if(USE_MYSQL)
+  find_path(USQL_MYSQL_INCLUDE_DIR mysql/mysql.h)
+  find_library(USQL_MYSQL_LIBRARY NAMES mysqlclient mariadbclient mariadb)
+  if(USQL_MYSQL_INCLUDE_DIR AND USQL_MYSQL_LIBRARY)
+    message(STATUS "MySQL client found: ${USQL_MYSQL_LIBRARY}, usql enabled")
+    target_sources(uco PRIVATE core/usql.cpp)
+    target_include_directories(uco PUBLIC ${USQL_MYSQL_INCLUDE_DIR})
+    target_link_libraries(uco PUBLIC ${USQL_MYSQL_LIBRARY})
+  else()
+    message(STATUS "MySQL client not found, usql disabled")
+  endif()
+endif()
 
 file(GLOB_RECURSE SRC_HTTP "src/*.cpp")
 
@@ -74,3 +93,14 @@ target_link_libraries(test_ushared_mutex PRIVATE ulog uco uring)
 
 add_executable(test_uchan tests/test_uchan.cpp)
 target_link_libraries(test_uchan PRIVATE ulog uco uring)
+
+add_executable(test_utimer tests/test_utimer.cpp)
+target_link_libraries(test_utimer PRIVATE ulog uco uring)
+
+add_executable(test_uredis tests/test_uredis.cpp)
+target_link_libraries(test_uredis PRIVATE ulog uco uring)
+
+if(USQL_MYSQL_INCLUDE_DIR AND USQL_MYSQL_LIBRARY)
+  add_executable(test_usql ${PROTO_SRCS} ${PROTO_HDRS} tests/test_usql.cpp)
+  target_link_libraries(test_usql PRIVATE ulog uco uring)
+endif()

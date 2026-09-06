@@ -1,255 +1,267 @@
+#pragma once
+
 /**
-  * 懒得写了，ai 生成一份伪代码🤡.
-  * 懒得写了，ai 生成一份伪代码🤡.
-  * 1. uring 监听读写：
-      - io_uring_prep_poll_add(sqe, fd, POLLIN);          // 监听可读
-      - io_uring_prep_poll_add(sqe, fd, POLLOUT);         // 监听可写
-      - io_uring_prep_poll_add(sqe, fd, POLLIN | POLLOUT); // 同时监听 
+ * @file usql.h
+ * @brief 基于 uco (io_uring + C++20 协程) 的 MySQL 异步基本 API.
+ *
+ * @note MySQL 异步接口文档:
+ *       https://dev.mysql.com/doc/c-api/8.4/en/c-api-asynchronous-interface-usage.html
+ * @note 所有接口默认超时 10s, ts = {0, 0} 表示不超时 (慎用);
+ *       超时时结果中 ok = false 且 timeout = true.
+ * @note 官方限制: 不支持 LOAD DATA / LOAD XML 与协议压缩;
+ *       异步操作完成前 sql 内存不得释放.
+ * @note 防 SQL 注入请使用 uescape().
+ */
 
-  * 2. MYSQL 异步接口参考：https://dev.mysqlserver.cn/doc/c-api/8.4/en/c-api-asynchronous-interface-usage.html#c-api-asynchronous-interface-example
-  * 3. MYSQL 连接管理思路：
-      - 连接池化（资源控制，并发限制）
-      - 连接池动态维护：空闲连接超时释放.
-      - 进程退出时注意释放.
-  * 4. poll_add 一定要有超时控制.
-  */
-// #pragma once
-// #include <mysql/mysql.h>
+#include "uio.h"
+#include "usync.h"
 
-// #define AWAIT_IO(call) \
-//     while (true) { \
-//         auto _status = call; \
-//         if (_status == NET_ASYNC_COMPLETE) break; \
-//         if (_status == NET_ASYNC_ERROR) { /* 错误处理 */ return; } \
-//         co_await wait_fd(fd, POLLIN | POLLOUT, timeout); \
-//     }
+#include <mysql/mysql.h>
+#include <google/protobuf/message.h>
+#include <google/protobuf/repeated_ptr_field.h>
 
-// #define AWAIT_IN(call) \
-//     while (true) { \
-//         auto _status = call; \
-//         if (_status == NET_ASYNC_COMPLETE) break; \
-//         if (_status == NET_ASYNC_ERROR) { /* 错误处理 */ return; } \
-//         co_await wait_fd(fd, POLLIN, timeout); \
-//     }
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <vector>
 
-// #define AWAIT_OUT(call) \
-//     while (true) { \
-//         auto _status = call; \
-//         if (_status == NET_ASYNC_COMPLETE) break; \
-//         if (_status == NET_ASYNC_ERROR) { /* 错误处理 */ return; } \
-//         co_await wait_fd(fd, POLLOUT, timeout); \
-//     }
+namespace usql
+{
 
-// int get_mysql_fd(MYSQL* conn)
-// {
-//     return (int)conn->net.fd;
-// }
+/// 操作错误信息.
+struct SqlError
+{
+    bool ok = true;           ///< 是否成功.
+    bool timeout = false;     ///< 是否超时失败.
+    unsigned int err_no = 0;  ///< 错误码.
+    std::string err_msg;      ///< 错误描述.
+    std::string sqlstate;     ///< SQLSTATE.
+};
 
-// uco::task<MYSQL*> mysql_init_async(const char* host, const char* user,
-//                         const char* pass, const char* db,
-//                         unsigned int port)
-// {
-//     MYSQL* mysql = mysql_init(nullptr);
-//     mysql_options(mysql, MYSQL_OPT_NONBLOCK, nullptr);
+/// INSERT 结果.
+struct InsertResult : SqlError
+{
+    uint64_t insert_id = 0;     ///< 自增主键.
+    uint64_t affected_rows = 0; ///< 影响行数.
+};
 
-//     AWAIT_IO( mysql_real_connect_nonblocking(
-//         mysql, host, user, pass, db, port, nullptr, 0
-//     ));
+/// UPDATE / DELETE 结果.
+struct AffectedResult : SqlError
+{
+    uint64_t affected_rows = 0; ///< 影响行数.
+};
 
-//     co_return mysql;
-// }
-// // 用法: MYSQL* mysql = co_await mysql_init_async(host, user, pass, db, port);
+/// SELECT 结果 (NULL 列以空串表示).
+struct SelectResult : SqlError
+{
+    unsigned int num_fields = 0;             ///< 列数.
+    uint64_t num_rows = 0;                   ///< 行数.
+    std::vector<std::string> column_names;   ///< 列名.
+    std::vector<enum_field_types> column_types; ///< 列类型.
+    std::vector<unsigned int> column_flags;  ///< 列标志 (UNSIGNED_FLAG 等).
+    std::vector<std::vector<std::string>> rows; ///< 行数据.
 
-// uco::task<InsertResult> async_insert(MYSQL* mysql, const char* sql, size_t len)
-// {
-//     // 发请求 + 收 OK 包（含 insert_id 和 affected_rows）
-//     AWAIT_IO(mysql_real_query_nonblocking(mysql, sql, len));
+    /// 严格校验列与 proto 描述符对齐 (列名 + 类型), 失败记 SYSERR.
+    bool check_alignment(const google::protobuf::Descriptor *desc) const;
 
-//     InsertResult result;
-//     result.insert_id   = mysql_insert_id(mysql);
-//     result.affected_rows = mysql_affected_rows(mysql);
-//     co_return result;
-// }
+    /// 严格绑定一行到 msg (须先通过 check_alignment), 失败记 SYSERR.
+    bool bind_row(size_t row_idx, google::protobuf::Message &msg) const;
+};
 
-// uco::task<uint64_t> async_update(MYSQL* mysql, const char* sql, size_t len)
-// {
-//     AWAIT_IO( mysql_real_query_nonblocking(mysql, sql, len) );
-//     co_return mysql_affected_rows(mysql);
-// }
+/// 事务中单条语句的结果.
+struct StmtResult
+{
+    uint64_t affected_rows = 0; ///< 影响行数.
+    uint64_t insert_id = 0;     ///< 自增主键.
+    unsigned int warnings = 0;  ///< 告警数.
+    bool ok = true;             ///< 是否成功.
+};
 
-// uco::task<uint64_t> async_delete(MYSQL* mysql, const char* sql, size_t len)
-// {
-//     AWAIT_IO( mysql_real_query_nonblocking(mysql, sql, len) );
-//     co_return mysql_affected_rows(mysql);
-// }
+/// 事务整体结果.
+struct TxnResult : SqlError
+{
+    bool committed = false;                ///< 是否成功提交.
+    std::vector<StmtResult> stmt_results;  ///< 每条语句的结果.
+};
 
-// uco::task<SelectResult> async_select(MYSQL* mysql, const char* sql, size_t len)
-// {
-//     // 步骤1：发送请求 + 收服务端确认包
-//     AWAIT_IO( mysql_real_query_nonblocking(mysql, sql, len) );
+// ==================== 连接 ====================
 
-//     // 步骤2：拉取结果集到本地内存（纯收数据）
-//     MYSQL_RES* result = nullptr;
-//     AWAIT_IN( mysql_store_result_nonblocking(mysql, &result) );
+/**
+ * @brief 建立数据库连接.
+ * @param use_ssl 是否启用 TLS. 默认关闭: 本地/内网免 TLS 握手开销
+ *                (实测 VM 上每连接可省 ~百 ms); 跨不可信网络置 true.
+ * @return 连接句柄, 失败返回 nullptr.
+ */
+uco::task<MYSQL *> uconnect(const char *host, const char *user,
+                                    const char *pass, const char *db,
+                                    unsigned int port,
+                                    uco_time_t ts = {10, 0},
+                                    bool use_ssl = false);
 
-//     // 步骤3：遍历（纯内存操作，不需要 await）
-//     SelectResult ret;
+/// 关闭连接 (发送 quit 包并释放 fd).
+void uclose(MYSQL *mysql);
 
-//     ret.num_fields = mysql_num_fields(result);
-//     ret.num_rows   = mysql_num_rows(result);
+/// 转义字符串, 拼 SQL 防注入用.
+std::string uescape(MYSQL *mysql, const std::string &s);
 
-//     MYSQL_FIELD* fields = mysql_fetch_fields(result);
-//     for (unsigned int i = 0; i < ret.num_fields; i++) {
-//         ret.column_names.push_back(fields[i].name);
-//     }
+// ==================== 增删改查 ====================
 
-//     MYSQL_ROW row;
-//     while ((row = mysql_fetch_row(result))) {
-//         unsigned long* lengths = mysql_fetch_lengths(result);
-//         std::vector<std::string> row_data(ret.num_fields);
-//         for (unsigned int i = 0; i < ret.num_fields; i++) {
-//             row_data[i] = std::string(row[i], lengths[i]);
-//         }
-//         ret.rows.push_back(std::move(row_data));
-//     }
+/**
+ * @brief 异步 INSERT.
+ * @return 自增主键与影响行数.
+ */
+uco::task<InsertResult> uinsert(MYSQL *mysql, std::string sql,
+                                uco_time_t ts = {10, 0});
 
-//     mysql_free_result(result);
-//     co_return ret;
-// }
+/**
+ * @brief 异步 UPDATE.
+ * @return 影响行数.
+ */
+uco::task<AffectedResult> uupdate(MYSQL *mysql, std::string sql,
+                                  uco_time_t ts = {10, 0});
 
-// // 防注入接口.
-// uco::task<MYSQL_STMT*> async_prepare(
-//     MYSQL* mysql, const char* stmt_sql, size_t len)
-// {
-//     MYSQL_STMT* stmt = mysql_stmt_init(mysql);
-//     if (!stmt) co_return nullptr;
+/**
+ * @brief 异步 DELETE.
+ * @return 影响行数.
+ */
+uco::task<AffectedResult> udelete(MYSQL *mysql, std::string sql,
+                                  uco_time_t ts = {10, 0});
 
-//     // prepare：发送模板 + 收确认
-//     AWAIT_IO( mysql_stmt_prepare_nonblocking(stmt, stmt_sql, len) );
-//     co_return stmt;
-// }
+/**
+ * @brief 异步 SELECT, 结果集全量拉取到内存.
+ * @return 列名与行数据.
+ */
+uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
+                                uco_time_t ts = {10, 0});
 
-// // 防注入接口.
-// uco::task<void> async_execute(MYSQL_STMT* stmt,
-//                                MYSQL_BIND* params, unsigned int param_count,
-//                                bool is_select /* 是否有结果集需要收 */)
-// {
-//     // 绑定参数（同步）
-//     mysql_stmt_bind_param(stmt, params);
+/**
+ * @brief 异步 SELECT, 结果集绑定到 pb 对象.
+ * @param out 单条形态: 绑定首行 (先清空, 多余行忽略, 空结果集不修改).
+ * @return 是否成功; 列与字段须同名且类型兼容, 违者 false.
+ */
+uco::task<bool> uselect(MYSQL *mysql, std::string sql,
+                        google::protobuf::Message *out,
+                        uco_time_t ts = {10, 0});
 
-//     // 执行：发送参数值 + 收确认
-//     AWAIT_IO( mysql_stmt_execute_nonblocking(stmt) );
+/**
+ * @brief 异步 SELECT, 结果集逐行填入 repeated 字段.
+ * @param out 如 resp.mutable_users(), 原有内容先清空.
+ * @return 是否成功, 语义同单条形态.
+ * @note 必须为模板: RepeatedPtrField 私有继承内部基类且无运行时
+ *       类型信息, 元素类型只能编译期获知.
+ */
+template <typename T>
+uco::task<bool> uselect(MYSQL *mysql, std::string sql,
+                        google::protobuf::RepeatedPtrField<T> *out,
+                        uco_time_t ts = {10, 0})
+{
+    static_assert(std::is_base_of_v<google::protobuf::Message, T>,
+                  "T must be a protobuf message type");
+    out->Clear();
+    T proto;
+    SelectResult res = co_await uselect(mysql, std::move(sql), ts);
+    if (!res.ok || !res.check_alignment(proto.GetDescriptor()))
+    {
+        co_return false;
+    }
+    for (size_t r = 0; r < res.rows.size(); r++)
+    {
+        if (!res.bind_row(r, *out->Add()))
+        {
+            co_return false;
+        }
+    }
+    co_return true;
+}
 
-//     // SELECT 需要额外拉取结果集
-//     if (is_select) {
-//         AWAIT_IN( mysql_stmt_store_result_nonblocking(stmt) );
-//     }
-// }
+// ==================== 事务 ====================
 
-// // 防注入接口.
-// // 完整使用示例：
-// uco::task<SelectResult> async_prepared_select(
-//     MYSQL* mysql, const char* template_sql, int min_age)
-// {
-//     // Prepare
-//     auto stmt = co_await async_prepare(mysql, template_sql, strlen(template_sql));
+/**
+ * @brief 异步事务: BEGIN -> 逐条执行 -> COMMIT, 任一步失败自动 ROLLBACK.
+ * @note GCC 13 已知 bug: 花括号初始化内含函数调用的写法会触发编译器 ICE,
+ *       如 co_await utransaction(m, {"...", make_str()});
+ *       请先构造 vector 再传入 (GCC 14+ 已修复).
+ */
+uco::task<TxnResult> utransaction(
+    MYSQL *mysql, std::vector<std::string> sqls, uco_time_t ts = {10, 0});
 
-//     // Bind
-//     MYSQL_BIND param[1] = {};
-//     param[0].buffer_type = MYSQL_TYPE_LONG;
-//     param[0].buffer      = &min_age;
+// ==================== 连接池 ====================
 
-//     // Execute + Store（SELECT 需要 IN）
-//     co_await async_execute(stmt, param, 1, true);
+/// 连接池: 复用连接, max_size 限制并发, 后台协程周期缩容 idle.
+class upool
+{
+  public:
+    /// 配置.
+    struct config
+    {
+        std::string host = "127.0.0.1"; ///< 主机.
+        std::string user;               ///< 用户名.
+        std::string pass;               ///< 密码.
+        std::string db;                 ///< 数据库.
+        unsigned int port = 3306;       ///< 端口.
+        size_t max_size = 16;           ///< 最大连接数 (并发限制).
+        size_t min_idle = 1;            ///< idle 保底数, 低于等于此值不再关闭.
+        uint64_t reap_interval_ms = 60000; ///< 缩容间隔 (ms), 每次关闭一个 idle.
+        bool use_ssl = false;           ///< TLS (本地/内网建议关, 省握手开销).
+        uco_time_t ts = {10, 0};        ///< 建连超时.
+    };
 
-//     // Fetch（同步）
-//     SelectResult result;
-//     result.num_fields = mysql_stmt_field_count(stmt);
-//     // ... mysql_stmt_fetch 循环 ...
+    static upool &GetInstance();
+    static upool &GetInstance(const config &cfg);
 
-//     mysql_stmt_close(stmt);
-//     co_return result;
-// }
+    upool(const upool &) = delete;
+    upool &operator=(const upool &) = delete;
+    upool(upool &&) = delete;
+    upool &operator=(upool &&) = delete;
 
-// struct StmtResult {
-//     ulonglong affected_rows = 0;
-//     ulonglong insert_id     = 0;
-//     unsigned int warnings   = 0;
-//     bool         ok          = true;
-// };
+    /**
+     * @brief 获取连接: 优先复用空闲, 否则新建; 达到 max_size 则等待.
+     * @return 连接句柄; 池已关闭或建连失败返回 nullptr.
+     */
+    uco::task<MYSQL *> acquire();
 
-// struct TxnResult {
-//     bool           committed = false;       // 是否成功提交
-//     std::vector<StmtResult> stmt_results;   // 每条语句的结果
-//     unsigned int   errno     = 0;            // 错误码
-//     std::string    error;                    // 错误描述
-//     std::string    sqlstate;                 // SQLSTATE
-// };
+    /// 归还连接; 死活自动判定: 连接级错误 (>= 2000) 销毁,
+    /// 服务端错误 (语法等) 或无错误则回收复用.
+    void release(MYSQL *mysql);
 
-// uco::task<TxnResult> async_transaction(MYSQL* mysql,
-//                                         const std::vector<const char*>& sqls)
-// {
-//     TxnResult txn;
+    /// 关闭池并释放全部连接 (含借出中的, 进程退出时调用).
+    void close();
 
-//     // BEGIN
-//     auto status = NET_ASYNC_NOT_READY;
-//     AWAIT_IO( status = mysql_real_query_nonblocking(mysql, "BEGIN", 5) );
-//     if (status == NET_ASYNC_ERROR) {
-//         txn.errno    = mysql_errno(mysql);
-//         txn.error    = mysql_error(mysql);
-//         txn.sqlstate = mysql_sqlstate(mysql);
-//         co_return txn;
-//     }
+  private:
+    static upool &instance(const config *cfg);
+    explicit upool(const config &cfg);
+    ~upool();
 
-//     // 逐条执行
-//     for (const auto& sql : sqls) {
-//         StmtResult sr;
+    /// 内部状态: shared_ptr 共享所有权 (reaper 协程与进行中的 acquire 各持
+    /// 一份), 保证池析构后协程仍能安全访问状态并自行退出.
+    struct state
+    {
+        state(const config &c, size_t permits_cnt)
+            : cfg(c), permits(permits_cnt)
+        {
+        }
 
-//         status = NET_ASYNC_NOT_READY;
-//         AWAIT_IO( status = mysql_real_query_nonblocking(mysql, sql, strlen(sql)) );
+        config cfg;
+        std::atomic<bool> closed{false};
+        std::mutex mtx;              ///< 保护 idle/all (临界区内无 co_await).
+        uco::usema permits;          ///< 槽位信号量, 容量 = max_size.
+        std::deque<MYSQL *> idle;    ///< 空闲连接 (队首最老).
+        std::set<MYSQL *> all;       ///< 全部存活连接 (含借出中).
+        uco::utimer waker;           ///< 可取消定时器, 供 reaper 睡眠.
+    };
 
-//         if (status == NET_ASYNC_ERROR) {
-//             sr.ok = false;
-//             txn.errno    = mysql_errno(mysql);
-//             txn.error    = mysql_error(mysql);
-//             txn.sqlstate = mysql_sqlstate(mysql);
+    /// 后台缩容协程: 每 reap_interval_ms 关闭一个 idle, 保底 min_idle.
+    /// 睡在可取消定时器上, close() 立即唤醒 (无需轮询, 不拖垮调度器收尾).
+    /// static: 不依赖池对象生命周期, 仅通过 st 访问状态.
+    static uco::task<void> reaper(std::shared_ptr<state> st);
 
-//             // 回滚
-//             AWAIT_IO( mysql_real_query_nonblocking(mysql, "ROLLBACK", 8) );
-//             txn.stmt_results.push_back(sr);
-//             co_return txn;
-//         }
+    std::shared_ptr<state> st_;
+};
 
-//         // ✅ 读取每条语句的结果信息
-//         sr.affected_rows = mysql_affected_rows(mysql);
-//         sr.insert_id     = mysql_insert_id(mysql);
-//         sr.warnings      = mysql_warning_count(mysql);
-
-//         txn.stmt_results.push_back(std::move(sr));
-//     }
-
-//     // COMMIT
-//     status = NET_ASYNC_NOT_READY;
-//     AWAIT_IO( status = mysql_real_query_nonblocking(mysql, "COMMIT", 6) );
-
-//     if (status == NET_ASYNC_ERROR) {
-//         txn.errno    = mysql_errno(mysql);
-//         txn.error    = mysql_error(mysql);
-//         txn.sqlstate = mysql_sqlstate(mysql);
-
-//         // commit 失败也要尝试 rollback
-//         AWAIT_IO( mysql_real_query_nonblocking(mysql, "ROLLBACK", 8) );
-//         co_return txn;
-//     }
-
-//     txn.committed = true;
-//     co_return txn;
-// }
-
-// void async_close(MYSQL* mysql)
-// {
-//     // mysql_close 内部发送 quit 包 + close(fd)
-//     // 同步调用即可，不需要 await
-//     mysql_close(mysql);
-//     // fd 此后失效
-// }
+} // namespace usql

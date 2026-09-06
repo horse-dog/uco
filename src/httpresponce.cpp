@@ -239,6 +239,13 @@ void HttpResponse::GenHttpHeader()
                                  "\r\n\r\n");
 }
 
+void HttpResponse::ShouldGenErrorPage(int httpRetCode)
+{
+    Reset(); // 作废旧响应（即使之前已设置 File/body/header/模板参数）
+    m_bShouldGenErrorPage = true;
+    m_iHttpRetCode = httpRetCode;
+};
+
 uco::task<void> HttpResponse::
 GenErrorPage(int httpRetCode, const std::string &fullpath)
 {
@@ -250,7 +257,7 @@ GenErrorPage(int httpRetCode, const std::string &fullpath)
         co_await StaticResourcePool::GetInstance().GetResource(fullpath);
     if (cache->first == -1)
     {
-        SYSWRN("html template", fullpath, "not valid");
+        LOGWRN("html template", fullpath, "not valid");
         GenErrorPageDefault(httpRetCode);
         co_return;
     }

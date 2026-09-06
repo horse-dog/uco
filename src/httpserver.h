@@ -5,6 +5,7 @@
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
+#include <exception>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -181,6 +182,31 @@ class HttpServer
     std::unordered_map<int, std::string> m_mapErrorPagePath;
 };
 
+// Abort() 抛出的控制流异常：中止 handler 链，
+// 由 HttpConnection::Process 统一捕获处理。
+// 调用 Abort() 之后的代码不会执行，无需再 co_return。
+class HttpException : public std::exception
+{
+  public:
+    HttpException(int httpRetCode, const std::string &msg)
+        : m_iHttpRetCode(httpRetCode), m_sMessage(msg)
+    {
+    }
+
+    const char *what() const noexcept override
+    {
+        return m_sMessage.empty() ? "http handler chain aborted"
+                                  : m_sMessage.c_str();
+    }
+
+    int code() const noexcept { return m_iHttpRetCode; }
+    const std::string &message() const noexcept { return m_sMessage; }
+
+  private:
+    int m_iHttpRetCode = 0;
+    std::string m_sMessage;
+};
+
 class HttpContext
 {
 
@@ -214,20 +240,11 @@ class HttpContext
 
     void File(const std::string &filepath);
 
-    // Just set code, no body.
-    void Status(int httpRetCode);
-
-    // Just set code, no body.
-    void AbortWithStatus(int httpRetCode);
-
-    // set code and corresponding html body.
-    // this func will clear file and previous
-    // response even if they are set.
-    void AbortWithStatusHtml(int httpRetCode);
-
     void Redirect(int httpRetCode, const std::string &location);
 
-    void Header(const std::string &key, const std::string &value);
+    std::string GetHeader(const std::string &key) const;
+
+    void SetHeader(const std::string &key, const std::string &value);
 
     std::string Param(const std::string &name) const;
 
@@ -238,33 +255,37 @@ class HttpContext
 
     const std::unordered_map<std::string, std::string> &QueryAll() const;
 
+    std::string GetCookie(const std::string& name) const;
+
+    void SetCookie(const std::string& name, const std::string& value,
+                   int max_age = -1, const std::string& path = "/",
+                   const std::string& domain = "", bool secure = false,
+                   bool http_only = false);
+
     std::string GetRawData();
 
     std::string_view PeekRawData();
 
     bool ShouldBindJSON(google::protobuf::Message &message);
 
-#define BindJSON(ctx, message)                                                 \
-    do                                                                         \
-    {                                                                          \
-        if (!ctx->ShouldBindJSON(message))                                     \
-        {                                                                      \
-            ctx->AbortWithStatusHtml(400);                                     \
-            co_return;                                                         \
-        }                                                                      \
-    } while (0)
+    void BindJSON(google::protobuf::Message &message);
+
+    bool ShouldBindForm(std::unordered_map<std::string, std::string> &fields,
+                        size_t max_body_size = 1024);
+
+    void BindForm(std::unordered_map<std::string, std::string> &fields,
+                  size_t max_body_size = 1024);
 
     uco::task<void> Next();
 
-    void Abort();
+    // 设置状态码.
+    void Status(int httpRetCode);
 
-#define CTXNEXT(context) co_await context->Next()
-#define CTXABORT(context)                                                      \
-    do                                                                         \
-    {                                                                          \
-        context->Abort();                                                      \
-        co_return;                                                             \
-    } while (0)
+    // 生成错误页面
+    void GenErrorPage(int httpRetCode);
+
+    // 中止 handler 链.
+    void Abort(int httpRetCode, const std::string &msg = "");
 
   private:
     class HttpRequest *m_ptrReq = 0;

@@ -38,6 +38,7 @@ namespace uco
 
 void OpenLog(const std::string& module_name, LogLevel level, LogMode mode, bool enable_syslog);
 
+// 包含变量名
 #define NR(X) X
 
 #define SYSDBG(...) uco::__inner__::Logger((int)0, LogLevel::DEBUG, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)

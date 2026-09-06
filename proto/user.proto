@@ -15,3 +15,13 @@ message JokeTemplate {
   int32 age = 2;
   repeated Address addresses = 3;
 }
+
+message TBUser {
+  uint64 vid = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message TBUserList {
+  repeated TBUser userlist = 1;
+}
