@@ -1,6 +1,7 @@
 // usleeper 竞态与跨线程场景验证:
 // 基础睡眠路径 / 醒着时唤醒 / 跨线程唤醒 / 唤醒已到期的睡眠 /
-// 唤醒与到期同时发生 / 多定时器堆重排 / 竞态压力 / 冲突睡眠 / 析构安全.
+// 唤醒与到期同时发生 / 多定时器堆重排 / 堆中摘除非堆顶睡眠 /
+// 竞态压力 / 冲突睡眠 / 析构安全.
 #include "usync.h"
 #include "uio.h"
 #include "ulog.h"
@@ -251,7 +252,37 @@ static uco::task<void> case_multiple_timers()
           "timers: expiry order preserved (t2 before t1)");
 }
 
-/// 7. 竞态压力: 多轮短睡 + 交错 wake, 验证无崩溃与状态无泄漏.
+/// 7. 重叠睡眠与堆中摘除: s1 睡 1s (堆顶), s2 睡 2s (非堆顶),
+///    还没到 1s 时从外部线程唤醒睡 2s 的: 堆顶睡眠的超时请求
+///    不受扰动 (照常睡满), s2 即刻返回且摘除后状态干净.
+static uco::task<void> case_wake_non_head_sleeper()
+{
+    uco::usleeper s1, s2;
+    sleep_outcome r1, r2;
+    go timed_sleep(s1, 1s, &r1); // 先挂起: 堆顶.
+    go timed_sleep(s2, 2s, &r2); // 后挂起: 到期更晚, 非堆顶.
+    uco::uthread th(wake_after_delay, &s2, 300ms); // 未到 1s, 跨线程唤醒 s2.
+    th.daemonize();
+    co_await uco_sleep(1300ms); // 等 s1 (1s) 走完, r2 早已于 300ms 返回.
+
+    CHECK(r1.r == timer_result::EXPIRED && r1.elapsed_ms >= 950 &&
+              r1.elapsed_ms < 1300,
+          "non-head: head sleeper (1s) unaffected, got", r1.elapsed_ms,
+          "ms");
+    CHECK(r2.r == timer_result::WOKEN && r2.elapsed_ms >= 250 &&
+              r2.elapsed_ms < 800,
+          "non-head: 2s sleeper woken before 1s, got", r2.elapsed_ms,
+          "ms");
+
+    // 摘除后状态干净: s2 可正常再睡.
+    auto begin = steady_clock::now();
+    auto r = co_await s2.sleep_for(80ms);
+    auto elapsed = ms_since(begin);
+    CHECK(r == timer_result::EXPIRED && elapsed >= 70,
+          "non-head: s2 state clean after removal");
+}
+
+/// 8. 竞态压力: 多轮短睡 + 交错 wake, 验证无崩溃与状态无泄漏.
 static uco::task<void> case_stress(uco::usleeper &t)
 {
     const int rounds = 50;
@@ -324,6 +355,7 @@ static uco::task<void> demo()
     co_await case_wake_after_expiry(t);
     co_await case_race_wake_vs_expiry(t);
     co_await case_multiple_timers();
+    co_await case_wake_non_head_sleeper();
     co_await case_stress(t);
     co_await case_sleep_conflict(t);
     co_await case_destroy();
