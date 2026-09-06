@@ -789,10 +789,11 @@ task<usleeper::result> usleeper_raw_sleep(usleeper *t, int64_t ns)
                     std::memory_order_acquire))
             { // 槽位被占: 未写任何共享字段, 先睡者完好. 拒绝并
               // 立即返回; 属正常可发生情形, 仅记调试日志.
+              // 注: 此处不得读 node 的非原子字段 (tid/prom 可能正被
+              // 登记线程写入), 仅使用 CAS 原子输出的 expect.
                 rejected = true;
-                FRAMEWORK_DBG("usleeper: concurrent sleep rejected, timer:",
+                FRAMEWORK_DBG("usleeper: concurrent sleep rejected, this:",
                               (void *)t, "state:", timer_state_name(expect),
-                              "sleeper tid:", node.tid,
                               "caller tid:", UCOENV.thread_id);
                 return false; // 不挂起, 协程立即继续执行.
             }
