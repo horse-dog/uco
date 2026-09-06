@@ -167,7 +167,7 @@ class upool
         uco::usema permits;                 ///< 槽位信号量, 容量 = max_size.
         std::deque<uconnection *> idle;     ///< 空闲连接 (队首最老).
         std::set<uconnection *> all;        ///< 全部存活连接 (含借出中).
-        uco::utimer waker;                  ///< 可取消定时器, 供 reaper 睡眠.
+        uco::usleeper waker;                  ///< 可取消定时器, 供 reaper 睡眠.
     };
 
     /// 后台缩容协程: 每 reap_interval_ms 关闭一个 idle, 保底 min_idle.
@@ -261,7 +261,7 @@ class ulock
         std::mutex token_mtx;          ///< 保护 token (临界区内无 co_await).
         std::string token;             ///< 当前持有者令牌 (空 = 未持有).
         uconnection *c = nullptr;      ///< 内部独占连接.
-        std::unique_ptr<uco::utimer> waker; ///< 看门狗定时器 (启用看门狗时创建).
+        std::unique_ptr<uco::usleeper> waker; ///< 看门狗定时器 (启用看门狗时创建).
     };
 
     /// 后台看门狗: 每 renew_interval_ms 续期一次, 睡在可取消定时器上,

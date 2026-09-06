@@ -2,6 +2,7 @@
 
 #include "umacro.h"
 #include "ulog.h"
+#include <atomic>
 #include <coroutine>
 #include <exception>
 #include <liburing.h>
@@ -385,6 +386,34 @@ namespace uco
 {
 namespace __inner__
 {
+
+/**
+ * @brief usleeper 一次睡眠的登记信息.
+ *
+ * 节点作为成员常驻于 usleeper 对象 (而非协程帧), 地址因此保持稳定,
+ * 任意线程调用 wake() 访问它都不会悬垂.
+ *
+ * st 同时兼任"睡眠槽位": sleep 以 CAS IDLE -> REGISTERING 原子占位
+ * (成功后才写其余字段), 因此同一 usleeper 同时至多一个生效睡眠.
+ * 槽位被占时后来者被拒 (记 SYSERR, 立即返回), 不影响先睡者:
+ *
+ * - 占位:     IDLE       -> REGISTERING (睡眠协程, 写字段前)
+ * - 就绪:     REGISTERING-> PARKED      (睡眠协程, 字段填毕后)
+ * - 自然到期: PARKED     -> EXPIRED     (睡眠所在线程的调度器)
+ * - 唤醒:     PARKED     -> WOKEN       (任意线程的 wake())
+ * - 清理:     *          -> IDLE        (睡眠协程, 恢复执行时)
+ */
+struct timer_node
+{
+    enum state { IDLE = 0, REGISTERING = 1, PARKED = 2, WOKEN = 3, EXPIRED = 4 };
+    std::atomic<int> st{IDLE};
+    uco::task<void>::promise_type *prom = nullptr; ///< 挂起期间有效 (唤醒投递目标).
+    u64 tid = 0;         ///< 睡眠所在线程 (跨线程唤醒时定位目标线程).
+    i64 deadline_ns = 0; ///< 到期时刻 (CLOCK_MONOTONIC 纳秒).
+    u64 idx = 0;         ///< 在定时器堆中的下标 (仅睡眠线程访问).
+    bool in_heap = false;///< 是否仍在定时器堆中 (仅睡眠线程访问).
+};
+
 struct thread_co_env
 {
 #ifndef _UCO_THREAD_ENV_IMPL
@@ -414,6 +443,23 @@ private:
     void *sync_list = 0;
     void *yield_list = 0;
     void *wait_sqe_list = 0;
+
+    // ---- per-thread timer infra (usleeper) ----
+    // 原理: 所有睡眠按到期时刻入小根堆, 线程只向 io_uring 提交一个
+    // 针对堆顶时刻的超时请求; 堆顶变化时取消旧请求、提交新请求.
+    void timer_push(uco::__inner__::timer_node *node);   // 入堆并更新超时请求
+    void timer_remove(uco::__inner__::timer_node *node); // 移出堆并更新超时请求
+    void timer_on_fire();                                // 超时请求完成: 唤醒到期睡眠
+    void timer_refresh();                                // 提交/取消超时请求 (幂等)
+    bool timer_active();                                 // 堆非空或存在未决超时请求
+
+    void *timer_heap = 0;                 ///< std::vector<timer_node*>*
+    struct __kernel_timespec *timer_ts = 0; ///< 超时请求的时长 (须存活到内核提交)
+    u64 timer_gen = 0;                    ///< 超时请求序号 (编码进 user_data)
+    i64 timer_inflight = 0;               ///< 已提交且未完成的超时请求数
+    i64 timer_armed_deadline = 0;         ///< 当前超时请求对应的到期时刻
+    u64 timer_armed_user_data = 0;        ///< 当前超时请求的 user_data (取消时定位用)
+    bool timer_arm_pending = false;       ///< 提交队列满导致的待重试标记
 
   private:
     thread_co_env();

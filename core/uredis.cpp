@@ -757,7 +757,7 @@ ulock::ulock(const config &cfg) : st_(std::make_shared<state>())
     if (st_->cfg.renew_interval_ms != 0)
     {
         st_->watchdog_armed = true;
-        st_->waker = std::make_unique<uco::utimer>(); // 看门狗的睡眠定时器.
+        st_->waker = std::make_unique<uco::usleeper>(); // 看门狗的睡眠定时器.
         go watchdog(st_);
     }
 }

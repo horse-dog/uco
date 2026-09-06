@@ -93,8 +93,8 @@ target_link_libraries(test_ushared_mutex PRIVATE ulog uco uring)
 add_executable(test_uchan tests/test_uchan.cpp)
 target_link_libraries(test_uchan PRIVATE ulog uco uring)
 
-add_executable(test_utimer tests/test_utimer.cpp)
-target_link_libraries(test_utimer PRIVATE ulog uco uring)
+add_executable(test_usleeper tests/test_usleeper.cpp)
+target_link_libraries(test_usleeper PRIVATE ulog uco uring)
 
 add_executable(test_uredis tests/test_uredis.cpp)
 target_link_libraries(test_uredis PRIVATE ulog uco uring)

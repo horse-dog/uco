@@ -1,6 +1,7 @@
 #include "ulog.h"
 #include "usql.h"
 #include "user.pb.h"
+#include <chrono>
 #include <vector>
 
 using namespace uco;
@@ -20,7 +21,8 @@ task<void> demo1(usql::upool& pool)
     if (!ret)
     {
         LOGERR("uselect error");
-        co_return; // 傻逼AI，co_return 不释放.
+        pool.release(m);
+        co_return;
     }
     LOGMSG("result:", users);
     pool.release(m);
@@ -41,6 +43,7 @@ task<void> demo2(usql::upool& pool)
     if (!ret)
     {
         LOGERR("uselect error");
+        pool.release(m);
         co_return;
     }
     LOGMSG("result:", user);
@@ -85,6 +88,7 @@ task<void> demo()
     batchrunner.add(demo2(pool));
     batchrunner.add(demo3(pool));
     co_await batchrunner.run();
+    co_await uco_sleep(std::chrono::seconds(5)); // 等待 reaper 缩容, 观察日志.
     pool.close();
 }
 

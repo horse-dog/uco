@@ -253,7 +253,7 @@ class upool
         uco::usema permits;          ///< 槽位信号量, 容量 = max_size.
         std::deque<MYSQL *> idle;    ///< 空闲连接 (队首最老).
         std::set<MYSQL *> all;       ///< 全部存活连接 (含借出中).
-        uco::utimer waker;           ///< 可取消定时器, 供 reaper 睡眠.
+        uco::usleeper waker;           ///< 可取消定时器, 供 reaper 睡眠.
     };
 
     /// 后台缩容协程: 每 reap_interval_ms 关闭一个 idle, 保底 min_idle.
