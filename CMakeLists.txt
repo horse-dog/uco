@@ -36,7 +36,7 @@ add_library(
   core/usync.cpp
   core/udaemon.cpp
   core/uredis.cpp
-  core/utils/string_utils.cpp
+  core/string_utils.cpp
 )
 target_link_libraries(uco PRIVATE uhook PUBLIC OpenSSL::Crypto)
 
