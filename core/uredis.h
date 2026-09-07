@@ -127,7 +127,8 @@ class upool
     };
 
     static upool &GetInstance();
-    static upool &GetInstance(const config &cfg);
+
+    void Init(const config &cfg);
 
     upool(const upool &) = delete;
     upool &operator=(const upool &) = delete;
@@ -138,18 +139,17 @@ class upool
      * @brief 获取连接: 优先复用空闲, 否则新建; 达到 max_size 则等待.
      * @return 连接句柄; 池已关闭或建连失败返回 nullptr.
      */
-    uco::task<uconnection *> acquire();
+    uco::task<uconnection *> Acquire();
 
     /// 归还连接; 死活自动判定: broken (传输错误/超时) 销毁,
     /// 服务端错误或无错误则回收复用.
-    void release(uconnection *c);
+    void Release(uconnection *c);
 
     /// 关闭池并释放全部连接 (含借出中的, 进程退出时调用).
-    void close();
+    void Close();
 
   private:
-    static upool &instance(const config *cfg);
-    explicit upool(const config &cfg);
+     upool();
     ~upool();
 
     /// 内部状态: shared_ptr 共享所有权 (reaper 协程与进行中的 acquire 各持
@@ -220,7 +220,7 @@ class ulock
      * @brief 非阻塞尝试获取一次.
      * @return 成功 true; 被他人持有或失败 false.
      */
-    uco::task<bool> try_acquire();
+    uco::task<bool> TryAcquire();
 
     /**
      * @brief 阻塞获取: 失败按 retry_interval_ms 重试,
@@ -229,25 +229,25 @@ class ulock
      * @note 连接断开会自动重建重试.
      * @param ts 总超时, {0, 0} 表示一直等 (慎用).
      */
-    uco::task<bool> acquire(uco_time_t ts = {10, 0});
+    uco::task<bool> Acquire(uco_time_t ts = {10, 0});
 
     /**
      * @brief 释放锁 (Lua 原子校验 token, 只释放自己持有的).
      * @return 成功释放 true; 本就未持有 / 锁已过期 / 命令失败 false.
      */
-    uco::task<bool> release();
+    uco::task<bool> Release();
 
     /**
      * @brief 手动续期 (仅自己持有时生效), 看门狗内部同样走此逻辑.
      * @return 续期成功 true; 锁已丢失或失败 false (并标记未持有).
      */
-    uco::task<bool> renew();
+    uco::task<bool> ReNew();
 
     /// 是否持有 (看门狗发现锁丢失会自动置 false).
-    bool owns() const;
+    bool Owns() const;
 
     /// 停止看门狗并断开连接 (不发命令, 进程退出时调用), 之后锁不可复用.
-    void close();
+    void Close();
 
   private:
     /// 内部状态: shared_ptr 共享所有权 (看门狗协程持一份),
@@ -272,6 +272,15 @@ class ulock
     static uco::task<bool> do_renew(std::shared_ptr<state> st);
 
     std::shared_ptr<state> st_;
+};
+
+class UredisGuard
+{
+public:
+    UredisGuard(uconnection *conn) : conn_(conn) {}
+    ~UredisGuard() { upool::GetInstance().Release(conn_); }
+private:
+    uconnection *conn_ = 0;
 };
 
 } // namespace uredis

@@ -51,6 +51,9 @@ class HttpConnection
   protected:
     uco::task<void> GenErrorPage(int code);
 
+    // 正常请求的处理流程，异常信息通过 sErrMsg 带回，响应头由 Process 统一生成.
+    uco::task<void> HandleRequest(std::string &sErrMsg);
+
     int m_iSocket;
     sockaddr_in m_sockAddr;
     HttpServer::HttpServerInstance *m_pHttpServer;

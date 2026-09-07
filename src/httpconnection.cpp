@@ -54,6 +54,8 @@ static bool advance_iov(struct iovec *&iov, int &iovcnt, ssize_t written)
     return iovcnt > 0;
 }
 
+// 在原始(未解码)URL上切分 path 与 query，query 键值按表单语义解码（+→空格）.
+// path 的解码由调用方处理（路径中 + 为字面字符，不转空格）.
 static void
 split_path_and_query(const std::string &url, std::string &path,
                      std::unordered_map<std::string, std::string> &queryParams)
@@ -77,14 +79,13 @@ split_path_and_query(const std::string &url, std::string &path,
         size_t eq = kv.find('=');
         if (eq != std::string::npos)
         {
-            std::string key = kv.substr(0, eq);
-            std::string value = kv.substr(eq + 1);
-            queryParams[key] = value;
+            queryParams[url_decode(kv.substr(0, eq), true)] =
+                url_decode(kv.substr(eq + 1), true);
         }
         else
         {
             // 没有 '=' 的情况
-            queryParams[kv] = "";
+            queryParams[url_decode(kv, true)] = "";
         }
     }
 }
@@ -334,6 +335,11 @@ uco::task<void> HttpConnection::CloseConnection()
 
 uco::task<void> HttpConnection::GenErrorPage(int code)
 {
+    // 清掉可能残留的半成品响应（body/文件/模板参数/Range/额外头），
+    // 保证三条内部路径拿到干净状态；Reset 会清零返回码，需在其后设置.
+    m_httpResponse.Reset();
+    m_httpResponse.SetHttpRetCode(code);
+
     // first search in static dict.
     auto errorPagePath = m_pHttpServer->GetErrorPagePath(code);
     if (!errorPagePath.empty())
@@ -395,24 +401,29 @@ static bool isSafePath(const std::string &urlPath)
     return true;
 }
 
-uco::task<bool> HttpConnection::Process()
+static std::string http_status_text(int code)
 {
-    auto httpStatus = m_httpRequest.Parse();
-    switch (httpStatus)
-    {
-    case HttpRequest::eRequestIncomplete:
-        co_return false;
-    case HttpRequest::eRequestBad:
-        m_httpResponse.SetKeepAlive(false);
-        co_await GenErrorPage(400);
-        m_httpResponse.GenHttpHeader();
-        co_return true;
-    default:
-        m_httpResponse.SetHttpRetCode(200);
-        m_httpResponse.SetKeepAlive(m_httpRequest.m_bKeepAlive);
-        break;
-    }
+    auto it = httpRetCode2StatusString.find(code);
+    return it != httpRetCode2StatusString.end() ? it->second : "Unknown";
+}
 
+static std::string peer_to_string(const sockaddr_in &addr)
+{
+    char buf[INET_ADDRSTRLEN] = {0};
+    if (inet_ntop(AF_INET, &addr.sin_addr, buf, sizeof(buf)) == nullptr)
+    {
+        return "unknown";
+    }
+    return std::string(buf) + ":" + std::to_string(ntohs(addr.sin_port));
+}
+
+// 正常请求的处理流程（解析已通过）.
+// 提前结束的分支只需设置好响应内容后 co_return，
+// 异常信息写入 sErrMsg 由调用方记录，响应头统一由 Process() 生成.
+uco::task<void> HttpConnection::HandleRequest(std::string &sErrMsg)
+{
+    m_httpResponse.SetHttpRetCode(200);
+    m_httpResponse.SetKeepAlive(m_httpRequest.m_bKeepAlive);
     m_httpResponse.m_httpRspContentType = "text/html"; // default as html.
     auto method = HttpServer::HttpMethodStr2Enum(m_httpRequest.m_sMethod);
 
@@ -421,36 +432,35 @@ uco::task<bool> HttpConnection::Process()
         m_httpRequest.m_sPath.pop_back();
         m_httpResponse.SetHttpRetCode(301);
         m_httpResponse.AddHeader("Location", m_httpRequest.m_sPath);
-        m_httpResponse.GenHttpHeader();
-        co_return true;
+        co_return;
     }
 
-    // url_decode path.
-    auto sDecodePath = url_decode(m_httpRequest.m_sPath);
+    // 先在原始串上切分，再对 path/query 分别解码
+    // （%3F/%26 等编码字符不会被误当作 ?/& 结构符号）.
+    std::string sRawPath;
+    std::unordered_map<std::string, std::string> mapQueryParams;
+    split_path_and_query(m_httpRequest.m_sPath, sRawPath, mapQueryParams);
+
+    // 路径解码: + 保持字面（+→空格只是表单编码规则，不适用于路径）.
+    auto sDecodePath = url_decode(sRawPath);
 
     // dir check.
     if (!isSafePath(sDecodePath))
     {
         m_httpResponse.SetKeepAlive(false);
         co_await GenErrorPage(400);
-        m_httpResponse.GenHttpHeader();
-        co_return true;
+        co_return;
     }
 
-    // Process /search?q=golang&page=2.
-    std::string sDecodePathWithoutQuery;
-    std::unordered_map<std::string, std::string> mapQueryParams;
-    split_path_and_query(sDecodePath, sDecodePathWithoutQuery, mapQueryParams);
-
     // Forward has the highest priority.
-    auto fwdpath = m_pHttpServer->GetForward(sDecodePathWithoutQuery);
+    auto fwdpath = m_pHttpServer->GetForward(sDecodePath);
     if (!fwdpath.empty())
     {
         m_httpRequest.m_sPath = fwdpath;
     }
     else
     {
-        m_httpRequest.m_sPath = sDecodePathWithoutQuery;
+        m_httpRequest.m_sPath = sDecodePath;
     }
 
     auto [handles, params] =
@@ -467,16 +477,19 @@ uco::task<bool> HttpConnection::Process()
         catch (const HttpException &e)
         {
             LOGMSG("Exception:", e.code(), e.what());
+            sErrMsg = std::string("exception: ") + e.what();
         }
         catch (const std::exception &e)
         {
             LOGERR("unhandled exception:", e.what());
+            sErrMsg = std::string("unhandled exception: ") + e.what();
             m_httpResponse.SetKeepAlive(false);
             m_httpResponse.ShouldGenErrorPage(500);
         }
         catch (...)
         {
             LOGERR("unknown exception");
+            sErrMsg = "unknown exception";
             m_httpResponse.SetKeepAlive(false);
             m_httpResponse.ShouldGenErrorPage(500);
         }
@@ -484,11 +497,6 @@ uco::task<bool> HttpConnection::Process()
     else
     {
         co_await GenErrorPage(404);
-    }
-
-    if (m_httpResponse.m_bShouldGenErrorPage)
-    {
-        co_await GenErrorPage(m_httpResponse.m_iHttpRetCode);
     }
 
     if (!m_httpResponse.m_httpRspStaticResourcePath.empty())
@@ -556,16 +564,52 @@ uco::task<bool> HttpConnection::Process()
             co_await GenErrorPage(cache->second);
         }
     }
-    else if (m_httpResponse.m_httpRspContentType ==
-             "application/x-www-form-urlencoded")
+
+    if (m_httpResponse.m_bShouldGenErrorPage)
     {
-        auto tmp =
-            std::string(m_httpResponse.m_httpRspContentBuffer.CurReadPos(),
-                        m_httpResponse.m_httpRspContentBuffer.CurWritePos());
-        m_httpResponse.m_httpRspContentBuffer.RetriveAll();
-        m_httpResponse.m_httpRspContentBuffer.Append(url_encode(tmp));
+        co_await GenErrorPage(m_httpResponse.m_iHttpRetCode);
     }
 
+    co_return;
+}
+
+uco::task<bool> HttpConnection::Process()
+{
+    auto httpStatus = m_httpRequest.Parse();
+    if (httpStatus == HttpRequest::eRequestIncomplete)
+    {
+        co_return false;
+    }
+
+    const auto tpStart = std::chrono::steady_clock::now();
+    // 请求基本信息（m_sPath 后续会被覆写/重定向，这里拷贝原始值）.
+    const std::string sMethod = m_httpRequest.m_sMethod;
+    const std::string sUrl = m_httpRequest.m_sPath;
+    const std::string sPeer = peer_to_string(m_sockAddr);
+    std::string sErrMsg;
+
+    if (httpStatus == HttpRequest::eRequestBad)
+    {
+        m_httpResponse.SetKeepAlive(false);
+        co_await GenErrorPage(400);
+    }
+    else
+    {
+        co_await HandleRequest(sErrMsg);
+    }
+
+    // 统一生成响应头: 所有分支共用，新增分支无需手动调用.
     m_httpResponse.GenHttpHeader();
+
+    // 请求日志（Process 单一出口，直接打印）:
+    // 基本信息 / 返回码 / 报错或提示信息 / 执行耗时.
+    const auto costMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - tpStart);
+    const int code = m_httpResponse.m_iHttpRetCode;
+    const std::string msg = sErrMsg.empty() ? http_status_text(code) : sErrMsg;
+    LOGMSGF(
+      "%s URL(%s) IP(%s) RET(%d) COST(%dms) MSG: %s",
+      sMethod.c_str(), sUrl.c_str(), sPeer.c_str(), code, (int)costMs.count(), msg.c_str()
+    );
     co_return true;
 }

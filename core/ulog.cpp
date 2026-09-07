@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <emmintrin.h>
 #include <array>
+#include <cstdarg>
 #include <string>
 #include <sstream>
 #include <string_view>
@@ -151,6 +152,61 @@ void process_log(LogLevel level, uint64_t timestamp, std::string& log)
     if (level == LogLevel::FATAL) std::terminate();
 }
 
+// 两遍式格式化 (先测长度再填充) 追加到日志体;
+// va_list 消耗后不可重用, 长度探测需 va_copy.
+static void append_fmt_body(std::ostringstream &sLog, const char *fmt,
+                            va_list ap)
+{
+    va_list aplen;
+    va_copy(aplen, ap);
+    int len = vsnprintf(nullptr, 0, fmt, aplen);
+    va_end(aplen);
+    if (len > 0)
+    {
+        std::vector<char> buf(static_cast<size_t>(len) + 1);
+        vsnprintf(buf.data(), buf.size(), fmt, ap);
+        sLog << buf.data();
+    }
+}
+
+void LoggerF(int role, LogLevel level, const std::string_view& filename,
+             const char* func, int line, const char* fmt, ...)
+{
+    if (!is_need_log(role, level))
+    {
+        return;
+    }
+
+    uint64_t timestamp = 0;
+    std::ostringstream sLog;
+    gen_log_header(timestamp, sLog, role, (int)level, filename, func, line);
+
+    va_list ap;
+    va_start(ap, fmt);
+    append_fmt_body(sLog, fmt, ap);
+    va_end(ap);
+
+    gen_log_tail(sLog);
+    std::string log = sLog.str();
+    process_log(level, timestamp, log);
+}
+
+void LoggerNoLocV(int role, LogLevel level, const char* fmt, va_list ap)
+{
+    if (!is_need_log(role, level))
+    {
+        return;
+    }
+
+    uint64_t timestamp = 0;
+    std::ostringstream sLog;
+    gen_log_header(timestamp, sLog, role, (int)level);
+    append_fmt_body(sLog, fmt, ap);
+    gen_log_tail(sLog);
+    std::string log = sLog.str();
+    process_log(level, timestamp, log);
+}
+
 void gen_log_header(uint64_t& timestamp, std::ostringstream& sLog, std::vector<std::string_view>& vecNames, 
     int role, int level, const std::string_view& filename, const char* func, int line, const char* varnames)
 {
@@ -174,13 +230,13 @@ void gen_log_header(uint64_t& timestamp, std::ostringstream& sLog, std::vector<s
          << NormalFontSize << LevelList[level].second;
 }
 
-void gen_log_header(uint64_t& timestamp, std::ostringstream& sLog, int role, int level, 
+void gen_log_header(uint64_t& timestamp, std::ostringstream& sLog, int role, int level,
                     const std::string_view& filename, const char* func, int line)
 {
     const static char* DefaultFont = "\033[0m";
     const static char* BoldFontSize = "\033[1;";
     const static char* NormalFontSize = "\033[0;";
-    const static std::array<std::pair<const char*, const char*>, 5> LevelList = 
+    const static std::array<std::pair<const char*, const char*>, 5> LevelList =
     {
         std::pair<const char*, const char*>{"DBG", "32m"},
         std::pair<const char*, const char*>{"MSG", "39m"},
@@ -191,8 +247,29 @@ void gen_log_header(uint64_t& timestamp, std::ostringstream& sLog, int role, int
     level = std::max(0, std::min(level, 5));
     const char* sRole = role == 0 ? "[\033[1;38;5;98mSYS\033[0m]" : "[\033[1;34mUSR\033[0m]";
     sLog << sRole << '[' << BoldFontSize << LevelList[level].second << LevelList[level].first << DefaultFont
-         << "] " << sMouduleName << '<' << pid << ',' << gettid_cache() << "> " 
-         << get_current_time(&timestamp) << " [" << filename << ':' << line << "](" << func << "): " 
+         << "] " << sMouduleName << '<' << pid << ',' << gettid_cache() << "> "
+         << get_current_time(&timestamp) << " [" << filename << ':' << line << "](" << func << "): "
+         << NormalFontSize << LevelList[level].second;
+}
+
+void gen_log_header(uint64_t& timestamp, std::ostringstream& sLog, int role, int level)
+{
+    const static char* DefaultFont = "\033[0m";
+    const static char* BoldFontSize = "\033[1;";
+    const static char* NormalFontSize = "\033[0;";
+    const static std::array<std::pair<const char*, const char*>, 5> LevelList =
+    {
+        std::pair<const char*, const char*>{"DBG", "32m"},
+        std::pair<const char*, const char*>{"MSG", "39m"},
+        std::pair<const char*, const char*>{"WRN", "33m"},
+        std::pair<const char*, const char*>{"ERR", "31m"},
+        std::pair<const char*, const char*>{"FTL", "95m"},
+    };
+    level = std::max(0, std::min(level, 5));
+    const char* sRole = role == 0 ? "[\033[1;38;5;98mSYS\033[0m]" : "[\033[1;34mUSR\033[0m]";
+    sLog << sRole << '[' << BoldFontSize << LevelList[level].second << LevelList[level].first << DefaultFont
+         << "] " << sMouduleName << '<' << pid << ',' << gettid_cache() << "> "
+         << get_current_time(&timestamp) << ' '
          << NormalFontSize << LevelList[level].second;
 }
 
@@ -259,5 +336,29 @@ void OpenLog(const std::string& module_name, LogLevel level, LogMode mode, bool 
         }
     }
 }
+
+// ==================== 函数式日志 (无定位信息) ====================
+
+#define UCO_NOLOC_LOG_IMPL(Fn, role, lv)                       \
+    void Fn(const char *fmt, ...)                               \
+    {                                                           \
+        va_list ap;                                             \
+        va_start(ap, fmt);                                      \
+        __inner__::LoggerNoLocV((int)role, lv, fmt, ap);        \
+        va_end(ap);                                             \
+    }
+
+UCO_NOLOC_LOG_IMPL(SysDbg, 0, LogLevel::DEBUG)
+UCO_NOLOC_LOG_IMPL(SysMsg, 0, LogLevel::INFO)
+UCO_NOLOC_LOG_IMPL(SysWrn, 0, LogLevel::WARN)
+UCO_NOLOC_LOG_IMPL(SysErr, 0, LogLevel::ERROR)
+UCO_NOLOC_LOG_IMPL(SysFtl, 0, LogLevel::FATAL)
+UCO_NOLOC_LOG_IMPL(LogDbg, 1, LogLevel::DEBUG)
+UCO_NOLOC_LOG_IMPL(LogMsg, 1, LogLevel::INFO)
+UCO_NOLOC_LOG_IMPL(LogWrn, 1, LogLevel::WARN)
+UCO_NOLOC_LOG_IMPL(LogErr, 1, LogLevel::ERROR)
+UCO_NOLOC_LOG_IMPL(LogFtl, 1, LogLevel::FATAL)
+
+#undef UCO_NOLOC_LOG_IMPL
 
 }

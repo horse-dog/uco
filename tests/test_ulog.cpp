@@ -6,6 +6,9 @@
 int main(int argc, const char* argv[])
 {
     uco::OpenLog("test", LogLevel::DEBUG, LogMode::CONSOLE, true);
+
+    uco::LogErr("Hello World %s", "test");
+
     LOGERR("Test", "hello, world", ',', +1e6, .12,   call(2, 3), ",", call("hello", "hello, world"), argc, NR(argc), ".");
 
     SYSDBG("Error, ret is:", NR(argc), ',', call(2, 3), !true, 1 != argc, "!");

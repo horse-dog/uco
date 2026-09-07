@@ -11,6 +11,7 @@
 #include <functional>
 #include <liburing.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <utility>
 
 #if USE_MYSQL_DBG
@@ -107,7 +108,7 @@ static uco::task<int> wait_fd(int fd, int events, uco_time_t ts)
                 sqe->flags |= IOSQE_IO_LINK;
                 auto sqe1 = UCOENV.get_sqe();
                 if (sqe1 == nullptr)
-                { // 主 sqe 置为 nop, 挂起重试.
+                {   // 主 sqe 置为 nop, 挂起重试.
                     sqe->user_data = 0;
                     io_uring_prep_nop(sqe);
                     this->p->set_value(-EAGAIN);
@@ -289,7 +290,27 @@ void uclose(MYSQL *mysql)
     {
         return;
     }
-    MYSQL_DBG("usql: close, fd:", get_mysql_fd(mysql));
+    const int fd = get_mysql_fd(mysql);
+    MYSQL_DBG("usql: close, fd:", fd);
+    if (fd > 0)
+    {
+        // 兜底: 发送缓冲仅剩少量空间的极端场景下, QUIT 部分写的
+        // 补发循环至多阻塞 1ms.
+        struct timeval tv = {0, 1000}; // 1ms.
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        // 探测发送缓冲: 可写则 mysql_close 内的 COM_QUIT 能立即发出,
+        // 优雅收尾(服务器不计 Aborted_clients); 不可写(缓冲满/对端
+        // 假死)则 shutdown 暴力关闭, mysql_close 退化为本地操作,
+        // 不阻塞调度线程.
+        struct pollfd pfd = {fd, POLLOUT, 0};
+        if (poll(&pfd, 1, 0) != 1 || !(pfd.revents & POLLOUT))
+        {
+            LOGWRN("usql: send buffer full on close, fd:", fd,
+                   "peer likely dead, force close");
+            shutdown(fd, SHUT_RDWR);
+        }
+    }
     mysql_close(mysql);
 }
 
@@ -746,33 +767,27 @@ uco::task<TxnResult> utransaction(MYSQL *mysql, std::vector<std::string> sqls,
 
 // ==================== 连接池 ====================
 
-upool &upool::instance(const config *cfg)
+upool::upool()
 {
-    static upool pool(cfg ? *cfg : config{});
-    return pool;
 }
 
-upool &upool::GetInstance()
+upool::~upool() { Close(); }
+
+upool& upool::GetInstance()
 {
-    return instance(nullptr);
+    static upool instance;
+    return instance;
 }
 
-upool &upool::GetInstance(const config &cfg)
+void upool::Init(const config &cfg)
 {
-    return instance(&cfg);
-}
-
-upool::upool(const config &cfg)
-    : st_(std::make_shared<state>(cfg, cfg.max_size ? cfg.max_size : 1))
-{
+    st_ = std::make_shared<state>(cfg, cfg.max_size ? cfg.max_size : 1);
     if (st_->cfg.max_size == 0)
     {
         st_->cfg.max_size = 1;
     }
     go reaper(st_);
 }
-
-upool::~upool() { close(); }
 
 /// 后台缩容协程: 每 reap_interval_ms 关闭一个 idle, 保底 min_idle.
 /// 睡在可取消定时器上, close() 经 waker.wake() 立即唤醒 (微秒级),
@@ -803,12 +818,12 @@ uco::task<void> upool::reaper(std::shared_ptr<state> st)
         if (victim != nullptr)
         {
             MYSQL_DBG("usql: pool reap idle, fd:", get_mysql_fd(victim));
-            uclose(victim); // 锁外关闭: mysql_close 含网络写, 不得阻塞临界区.
+            uclose(victim);
         }
     }
 }
 
-uco::task<MYSQL *> upool::acquire()
+uco::task<MYSQL *> upool::Acquire()
 {
     auto st = st_; // 协程帧持有状态所有权, 池析构也能安全完成.
 
@@ -862,7 +877,7 @@ uco::task<MYSQL *> upool::acquire()
     co_return m;
 }
 
-void upool::release(MYSQL *mysql)
+void upool::Release(MYSQL *mysql)
 {
     if (mysql == nullptr)
     {
@@ -906,7 +921,7 @@ void upool::release(MYSQL *mysql)
             SYSERR("usql: pool release: pool closed, destroy, fd:",
                    get_mysql_fd(mysql));
         }
-        uclose(mysql); // 锁外关闭: mysql_close 含网络写, 不得阻塞临界区.
+        uclose(mysql);
     }
     else
     {
@@ -914,7 +929,7 @@ void upool::release(MYSQL *mysql)
     }
 }
 
-void upool::close()
+void upool::Close()
 {
     std::vector<MYSQL *> victims;
     {
@@ -934,7 +949,7 @@ void upool::close()
     SYSMSG("usql: pool close, conns:", victims.size());
     for (auto mysql : victims)
     {
-        uclose(mysql); // 锁外关闭: mysql_close 含网络写, 不得阻塞临界区.
+        uclose(mysql);
     }
 }
 

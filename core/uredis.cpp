@@ -537,25 +537,9 @@ uco::task<Reply> uping(uconnection *c, uco_time_t ts)
 
 // ==================== 连接池 ====================
 
-upool &upool::instance(const config *cfg)
+void upool::Init(const config &cfg)
 {
-    static upool pool(cfg ? *cfg : config{});
-    return pool;
-}
-
-upool &upool::GetInstance()
-{
-    return instance(nullptr);
-}
-
-upool &upool::GetInstance(const config &cfg)
-{
-    return instance(&cfg);
-}
-
-upool::upool(const config &cfg)
-    : st_(std::make_shared<state>(cfg, cfg.max_size ? cfg.max_size : 1))
-{
+    st_ = std::make_shared<state>(cfg, cfg.max_size ? cfg.max_size : 1);
     if (st_->cfg.max_size == 0)
     {
         st_->cfg.max_size = 1;
@@ -563,7 +547,15 @@ upool::upool(const config &cfg)
     go reaper(st_);
 }
 
-upool::~upool() { close(); }
+upool::upool() {}
+
+upool::~upool() { Close(); }
+
+upool& upool::GetInstance()
+{
+    static upool instance;
+    return instance;
+}
 
 /// 后台缩容协程: 每 reap_interval_ms 关闭一个 idle, 保底 min_idle.
 /// 睡在可取消定时器上, close() 经 waker.wake() 立即唤醒 (微秒级),
@@ -597,7 +589,7 @@ uco::task<void> upool::reaper(std::shared_ptr<state> st)
     }
 }
 
-uco::task<uconnection *> upool::acquire()
+uco::task<uconnection *> upool::Acquire()
 {
     auto st = st_; // 协程帧持有状态所有权, 池析构也能安全完成.
 
@@ -645,7 +637,7 @@ uco::task<uconnection *> upool::acquire()
     co_return c;
 }
 
-void upool::release(uconnection *c)
+void upool::Release(uconnection *c)
 {
     if (c == nullptr)
     {
@@ -679,7 +671,7 @@ void upool::release(uconnection *c)
     }
 }
 
-void upool::close()
+void upool::Close()
 {
     std::vector<uconnection *> victims;
     {
@@ -762,7 +754,7 @@ ulock::ulock(const config &cfg) : st_(std::make_shared<state>())
     }
 }
 
-ulock::~ulock() { close(); }
+ulock::~ulock() { Close(); }
 
 /// 后台看门狗: 每 renew_interval_ms 续期一次.
 /// 睡在可取消定时器上, close() 经 waker->wake() 立即唤醒 (微秒级),
@@ -847,7 +839,7 @@ uco::task<bool> ulock::do_renew(std::shared_ptr<state> st)
     co_return ok;
 }
 
-uco::task<bool> ulock::try_acquire()
+uco::task<bool> ulock::TryAcquire()
 {
     auto guard = co_await uco::ulock_guard(st_->cmd_mtx);
     if (st_->stopped)
@@ -909,11 +901,11 @@ uco::task<bool> ulock::try_acquire()
     co_return true;
 }
 
-uco::task<bool> ulock::acquire(uco_time_t ts)
+uco::task<bool> ulock::Acquire(uco_time_t ts)
 {
     if (st_->cfg.retry_interval_ms == 0)
     {
-        co_return co_await try_acquire();
+        co_return co_await TryAcquire();
     }
 
     __inner__::deadline dl;
@@ -921,7 +913,7 @@ uco::task<bool> ulock::acquire(uco_time_t ts)
 
     while (true)
     {
-        if (co_await try_acquire())
+        if (co_await TryAcquire())
         {
             co_return true;
         }
@@ -949,7 +941,7 @@ uco::task<bool> ulock::acquire(uco_time_t ts)
     }
 }
 
-uco::task<bool> ulock::release()
+uco::task<bool> ulock::Release()
 {
     auto guard = co_await uco::ulock_guard(st_->cmd_mtx);
     if (st_->stopped)
@@ -985,15 +977,15 @@ uco::task<bool> ulock::release()
     co_return r.ok && r.type == Reply::INTEGER && r.integer == 1;
 }
 
-uco::task<bool> ulock::renew() { co_return co_await do_renew(st_); }
+uco::task<bool> ulock::ReNew() { co_return co_await do_renew(st_); }
 
-bool ulock::owns() const
+bool ulock::Owns() const
 {
     std::lock_guard<std::mutex> guard(st_->token_mtx);
     return !st_->token.empty();
 }
 
-void ulock::close()
+void ulock::Close()
 {
     st_->stopped = true;
     {
