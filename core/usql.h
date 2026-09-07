@@ -104,7 +104,7 @@ uco::task<MYSQL *> uconnect(const char *host, const char *user,
                                     uco_time_t ts = {10, 0},
                                     bool use_ssl = false);
 
-/// 关闭连接 (发送 quit 包并释放 fd).
+/// 关闭连接.
 void uclose(MYSQL *mysql);
 
 /// 转义字符串, 拼 SQL 防注入用.
@@ -213,29 +213,29 @@ class upool
     };
 
     static upool &GetInstance();
-    static upool &GetInstance(const config &cfg);
 
     upool(const upool &) = delete;
     upool &operator=(const upool &) = delete;
     upool(upool &&) = delete;
     upool &operator=(upool &&) = delete;
 
+    void Init(const config &cfg);
+
     /**
      * @brief 获取连接: 优先复用空闲, 否则新建; 达到 max_size 则等待.
      * @return 连接句柄; 池已关闭或建连失败返回 nullptr.
      */
-    uco::task<MYSQL *> acquire();
+    uco::task<MYSQL *> Acquire();
 
     /// 归还连接; 死活自动判定: 连接级错误 (>= 2000) 销毁,
     /// 服务端错误 (语法等) 或无错误则回收复用.
-    void release(MYSQL *mysql);
+    void Release(MYSQL *mysql);
 
     /// 关闭池并释放全部连接 (含借出中的, 进程退出时调用).
-    void close();
+    void Close();
 
   private:
-    static upool &instance(const config *cfg);
-    explicit upool(const config &cfg);
+     upool();
     ~upool();
 
     /// 内部状态: shared_ptr 共享所有权 (reaper 协程与进行中的 acquire 各持
@@ -253,7 +253,7 @@ class upool
         uco::usema permits;          ///< 槽位信号量, 容量 = max_size.
         std::deque<MYSQL *> idle;    ///< 空闲连接 (队首最老).
         std::set<MYSQL *> all;       ///< 全部存活连接 (含借出中).
-        uco::utimer waker;           ///< 可取消定时器, 供 reaper 睡眠.
+        uco::usleeper waker;           ///< 可取消定时器, 供 reaper 睡眠.
     };
 
     /// 后台缩容协程: 每 reap_interval_ms 关闭一个 idle, 保底 min_idle.
@@ -262,6 +262,15 @@ class upool
     static uco::task<void> reaper(std::shared_ptr<state> st);
 
     std::shared_ptr<state> st_;
+};
+
+class UsqlGuard
+{
+public:
+    UsqlGuard(MYSQL *conn) : conn_(conn) {}
+    ~UsqlGuard() { upool::GetInstance().Release(conn_); }
+private:
+    MYSQL *conn_ = 0;
 };
 
 } // namespace usql

@@ -1,5 +1,6 @@
 #pragma once
 #include "uco.h"
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <memory>
@@ -320,119 +321,94 @@ class usema
 };
 
 /**
- * @brief 可取消 / 可更新的 io_uring 定时睡眠 (单线程模型).
+ * @brief 可唤醒的定时睡眠 (框架级定时器, 支持跨线程唤醒).
  *
- * 协程睡在 io_uring timeout 上时, 外界无法及时唤醒它, 只能靠短间隔
- * 轮询标志位. 本类通过 IORING_OP_ASYNC_CANCEL (与 timeout 同一
- * user_data) 实现 "睡眠 / 取消 / 更新", 消除轮询.
+ * 睡眠按到期时刻挂入所在线程的定时器堆 (小根堆); 每个线程只向
+ * io_uring 提交一个针对堆顶时刻的超时请求, 到期后由调度器唤醒
+ * 所有该醒的睡眠. wake() 任意线程可调: 与自然到期经原子状态
+ * (PARKED -> WOKEN / EXPIRED) 仲裁, 赢家负责唯一一次唤醒, 无竞态.
  *
- * @note 线程约束: 所有接口仅可在 utimer 所在线程调用, 入口有运行时
- *       检查; 跨线程调用记 SYSERR 并拒绝, sleeper 睡满自然醒
- *       (安全降级, 避免数据竞争).
- * @note 唤醒为提示性 (类似条件变量): wake() 时若无睡眠进行中,
- *       记为待处理请求, 下一次睡眠立即返回 false, 不丢失唤醒.
- * @note 析构时须无挂起的睡眠 (由调用方结构保证, 如协程帧持有
- *       外层 state 的 shared_ptr).
- * @note sleep_until 内部换算为剩余时长走相对 timeout (不用
- *       IORING_TIMEOUT_ABS: 需 5.15+ 且固定 CLOCK_REALTIME);
- *       被 wake 打断后以原时刻重睡会重新换算, 无漂移.
+ * @note 资源: 与实例数无关. fd 为每线程一个 (框架唤醒通道);
+ *       io_uring 流量仅取决于堆顶变化次数, 而非睡眠次数.
+ * @note 线程约束: sleep_for/sleep_until 须在协程中 co_await; wake()
+ *       任意线程 (含非 uco 线程) 均可调用.
+ * @note 唤醒为提示性 (类似条件变量): wake() 时若无挂起睡眠, 计数
+ *       保留, 下一次 sleep_for 立即返回 false, 不丢失唤醒.
+ * @note 同一 usleeper 同时至多一个生效睡眠: 冲突时后来者不 core,
+ *       记 SYSERR 并立即返回 false (语义同被唤醒), 先睡者不受
+ *       影响; 先睡者恢复后槽位自动释放.
+ * @note 析构时须无挂起睡眠 (由调用方结构保证, 如协程帧持有外层
+ *       state 的 shared_ptr).
+ * @note sleep_until 内部换算为剩余时长; 被 wake 打断后以原时刻重睡
+ *       会重新换算, 无漂移.
  */
-class utimer
+class usleeper
 {
   public:
-    utimer() : owner_tid_(std::this_thread::get_id()) {}
-    ~utimer() = default;
+    usleeper() = default;
+    ~usleeper();
 
-    utimer(const utimer &) = delete;
-    utimer &operator=(const utimer &) = delete;
+    usleeper(const usleeper &) = delete;
+    usleeper &operator=(const usleeper &) = delete;
+
+    /// sleep 的结果.
+    enum result
+    {
+        EXPIRED, ///< 睡满: 自然到期 (时长 <= 0 视为已到期).
+        WOKEN,   ///< 被 wake() 打断 (含消费醒着时积压的唤醒请求).
+        BUSY,    ///< 未睡: 槽位被另一个进行中的睡眠占用 (提示性,
+                 ///< 生产环境可能频繁发生, 仅记调试日志).
+    };
 
     /**
      * @brief 睡眠指定时长.
-     * @param d 时长, 任意 chrono duration; <= 0 视为已睡满.
-     * @return true 睡满; false 被 wake()/update() 打断.
+     * @param d 时长, 任意 chrono duration; <= 0 视为已睡满,
+     *          不消耗待处理唤醒.
+     * @return 结果, 见 result.
      */
     template <typename Rep, typename Period>
-    task<bool> sleep_for(const std::chrono::duration<Rep, Period> &d)
+    task<result> sleep_for(const std::chrono::duration<Rep, Period> &d)
     {
-        if (owner_tid_ != std::this_thread::get_id())
-        {
-            thread_violation("sleep_for");
-            co_return false;
-        }
-        if (wake_requested_)
-        {
-            wake_requested_ = false;
-            co_return false;
+        if (pending_wakes_.exchange(0, std::memory_order_acquire) > 0)
+        { // 醒着时积压的唤醒请求: 视为被唤醒, 不丢失.
+            co_return WOKEN;
         }
         auto ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
         if (ns <= 0)
-        {
-            co_return true;
+        { // 时长已到: 视为睡满.
+            co_return EXPIRED;
         }
-        int res = co_await utimer_raw_sleep(this, ns);
-        co_return (res == -ETIME); // 到期 -ETIME, 被取消 -ECANCELED.
+        co_return co_await usleeper_raw_sleep(this, ns);
     }
 
     /**
      * @brief 睡眠到指定时刻.
      * @param tp 目标时刻, 任意 Clock 的 time_point; 已过则立即返回.
-     * @return true 到达目标时刻; false 被 wake()/update() 打断.
+     * @return 结果, 见 result.
      */
     template <typename Clock, typename Duration>
-    task<bool> sleep_until(
+    task<result> sleep_until(
         const std::chrono::time_point<Clock, Duration> &tp)
     {
         auto now = Clock::now();
         if (now >= tp)
         {
-            co_return true;
+            co_return EXPIRED;
         }
         co_return co_await sleep_for(tp - now);
     }
 
     /**
-     * @brief 打断当前睡眠 (提示性, 见类注释).
+     * @brief 打断一个挂起中的睡眠 (提示性, 见类注释); 任意线程可调.
      */
     void wake();
 
-    /**
-     * @brief 打断当前睡眠并捎带新时长.
-     *        sleeper 醒后经 take_pending() 读取并以新时长重睡.
-     * @param d 新时长, 任意 chrono duration.
-     */
-    template <typename Rep, typename Period>
-    void update(const std::chrono::duration<Rep, Period> &d)
-    {
-        if (owner_tid_ != std::this_thread::get_id())
-        {
-            thread_violation("update");
-            return;
-        }
-        has_pending_ = true;
-        pend_ns_ =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
-        wake();
-    }
-
-    /**
-     * @brief 读取并清除 update() 捎带的时长.
-     * @param d [out] 输出新时长.
-     * @return true 有 pending; false 无.
-     */
-    bool take_pending(std::chrono::nanoseconds &d);
-
   private:
-    friend task<int> utimer_raw_sleep(utimer *, int64_t ns);
+    friend task<result> usleeper_raw_sleep(usleeper *, int64_t ns);
 
-    /// 跨线程调用检测: 记 SYSERR (接口名/期望线程/实际线程).
-    void thread_violation(const char *op) const;
-
-    std::thread::id owner_tid_;       ///< 构造线程 = 唯一合法调用线程.
-    void *sleeping_handle_ = nullptr; ///< 挂起中 sleeper 句柄 (cancel 目标).
-    bool wake_requested_ = false;     ///< 醒着时收到的唤醒请求, 下次睡眠即醒.
-    bool has_pending_ = false;        ///< update 捎带的新时长有效位.
-    int64_t pend_ns_ = 0;             ///< update 捎带的新时长 (纳秒).
+    __inner__::timer_node node_;      ///< 常驻睡眠节点 (地址稳定).
+    std::atomic<uint64_t> pending_wakes_ = 0; ///< 醒着时的唤醒计数.
 };
 
 template <typename _Tp, int Size=0> class uchan

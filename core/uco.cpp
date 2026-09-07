@@ -126,6 +126,11 @@ struct sync_linked_list
         return p;
     }
 
+    bool empty() const noexcept
+    {
+        return list_head.load(std::memory_order_acquire) == nullptr;
+    }
+
   private:
     std::atomic<task<void>::promise_type *> list_head = nullptr;
 };
@@ -214,6 +219,8 @@ thread_co_env::thread_co_env()
 
     yield_list = new uco_linked_list();
     wait_sqe_list = new uco_linked_list();
+    timer_heap = new std::vector<__inner__::timer_node *>();
+    timer_ts = new struct __kernel_timespec;
 
     context_mutex.lock();
     auto [it, ok] = context_map.try_emplace(thread_id, sync_fd, this);
@@ -249,6 +256,14 @@ thread_co_env::~thread_co_env()
     if (pWaitSqeList) delete pWaitSqeList;
     wait_sqe_list = nullptr;
 
+    auto *pTimerHeap = (std::vector<__inner__::timer_node *> *)timer_heap;
+    if (pTimerHeap) delete pTimerHeap;
+    timer_heap = nullptr;
+
+    auto *pTimerTs = (struct __kernel_timespec *)timer_ts;
+    if (pTimerTs) delete pTimerTs;
+    timer_ts = nullptr;
+
     struct io_uring* pUring = (struct io_uring*)uring;
     if (pUring) delete pUring;
     uring = nullptr;
@@ -268,10 +283,19 @@ void thread_co_env::schedule()
     while (true)
     {
         if (io_event_count == 0 && sync_event_count == 0 &&
-            yield_co_list->empty() && sqe_co_list->empty())
+            yield_co_list->empty() && sqe_co_list->empty() &&
+            sync_co_list->empty())
         {
-            FRAMEWORK_DBG("shceduler exit");
-            break;
+            if (timer_active())
+            { // 堆非空或超时请求未决: 此刻提交队列必有余位,
+                // 补交/取消超时请求, 再继续循环等完成事件.
+                timer_refresh();
+            }
+            else
+            {
+                FRAMEWORK_DBG("shceduler exit");
+                break;
+            }
         }
 
         // process sync list coroutines.
@@ -294,6 +318,12 @@ void thread_co_env::schedule()
         {
             auto co = yield_co_list->pop();
             resume(NODE2ADDR(co));
+        }
+
+        // 提交队列曾满导致超时请求没交上, 重试.
+        if (timer_arm_pending)
+        {
+            timer_refresh();
         }
 
         // register read sync fd if failed.
@@ -326,6 +356,12 @@ void thread_co_env::schedule()
                     ++io_event_count;
                     continue;
                 }
+                if ((cqe->user_data & 0xff) == 2)
+                { // 定时器超时请求完成 (到期或被取消): 幂等处理.
+                    --timer_inflight;
+                    timer_on_fire();
+                    continue;
+                }
                 auto ptr = (void *)cqe->user_data;
                 auto &&handle = task<void>::coro_handle::from_address(ptr);
                 handle.promise().set_value(cqe->res);
@@ -345,6 +381,221 @@ void thread_co_env::schedule()
             }
         }
     }
+}
+
+// ==================== per-thread timer infra (usleeper) ====================
+// user_data 布局: (序号 << 8) | 2. 协程句柄 8 字节对齐 (低 3 位为 0),
+// 永不与标记值 2 冲突; 0/1 为调度器保留值. 序号逐次递增, 使每次提交的
+// 超时请求可被精确定位和取消.
+
+int push_sync_node_to_thread(uco::task<void>::promise_type *node);
+
+static i64 mono_now_ns()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (i64)ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
+}
+
+bool thread_co_env::timer_active()
+{
+    auto &heap = *(std::vector<__inner__::timer_node *> *)timer_heap;
+    return !heap.empty() || timer_inflight > 0 || timer_arm_pending;
+}
+
+/// 入堆 (仅睡眠线程调用), 维护 min-heap 与 idx.
+void thread_co_env::timer_push(__inner__::timer_node *node)
+{
+    auto &heap = *(std::vector<__inner__::timer_node *> *)timer_heap;
+    if (node->in_heap) [[unlikely]]
+    { // 不变量检查: 占位 CAS 成功意味着槽位曾为 IDLE, 即上一个睡眠
+      // 已清理 (in_heap 必为 false). 正常流程不可达, 仅防实现回归.
+        SYSFTL("usleeper: invariant broken, push a node already in heap");
+    }
+    node->in_heap = true;
+    heap.push_back(node);
+    u64 i = heap.size() - 1;
+    while (i > 0)
+    { // sift up.
+        u64 parent = (i - 1) / 2;
+        if (heap[parent]->deadline_ns <= heap[i]->deadline_ns)
+        {
+            break;
+        }
+        std::swap(heap[parent], heap[i]);
+        heap[parent]->idx = parent;
+        heap[i]->idx = i;
+        i = parent;
+    }
+    node->idx = i;
+    timer_refresh();
+}
+
+/// 移出堆 (仅睡眠线程调用: 睡眠协程被唤醒后自行清理).
+void thread_co_env::timer_remove(__inner__::timer_node *node)
+{
+    auto &heap = *(std::vector<__inner__::timer_node *> *)timer_heap;
+    if (!node->in_heap)
+    {
+        return; // 已被 timer_on_fire 弹出.
+    }
+    node->in_heap = false;
+    u64 i = node->idx;
+    heap[i] = heap.back();
+    heap[i]->idx = i;
+    heap.pop_back();
+    if (i < heap.size())
+    { // sift down + up (被换上来的尾元素可能两个方向都要走).
+        while (true)
+        {
+            u64 left = 2 * i + 1, right = left + 1, best = i;
+            if (left < heap.size() &&
+                heap[left]->deadline_ns < heap[best]->deadline_ns)
+            {
+                best = left;
+            }
+            if (right < heap.size() &&
+                heap[right]->deadline_ns < heap[best]->deadline_ns)
+            {
+                best = right;
+            }
+            if (best == i)
+            {
+                break;
+            }
+            std::swap(heap[best], heap[i]);
+            heap[best]->idx = best;
+            heap[i]->idx = i;
+            i = best;
+        }
+        while (i > 0)
+        {
+            u64 parent = (i - 1) / 2;
+            if (heap[parent]->deadline_ns <= heap[i]->deadline_ns)
+            {
+                break;
+            }
+            std::swap(heap[parent], heap[i]);
+            heap[parent]->idx = parent;
+            heap[i]->idx = i;
+            i = parent;
+        }
+    }
+    timer_refresh();
+}
+
+/// 超时请求的完成事件到达 (到期, 或被取消): 唤醒所有已到期的睡眠.
+/// 幂等: 过期的完成事件 (取消与到期同时发生) 唤醒不了任何人,
+/// 只是多触发一次超时请求的更新, 无害.
+void thread_co_env::timer_on_fire()
+{
+    auto &heap = *(std::vector<__inner__::timer_node *> *)timer_heap;
+    i64 now = mono_now_ns();
+    while (!heap.empty() && heap.front()->deadline_ns <= now)
+    {
+        auto n = heap.front();
+        heap[0] = heap.back();
+        heap[0]->idx = 0;
+        heap.pop_back();
+        n->in_heap = false;
+        size_t i = 0; // 恢复堆序 (sift down).
+        while (true)
+        {
+            size_t left = 2 * i + 1, right = left + 1, best = i;
+            if (left < heap.size() &&
+                heap[left]->deadline_ns < heap[best]->deadline_ns)
+            {
+                best = left;
+            }
+            if (right < heap.size() &&
+                heap[right]->deadline_ns < heap[best]->deadline_ns)
+            {
+                best = right;
+            }
+            if (best == i)
+            {
+                break;
+            }
+            std::swap(heap[best], heap[i]);
+            heap[best]->idx = best;
+            heap[i]->idx = i;
+            i = best;
+        }
+        int expect = __inner__::timer_node::PARKED;
+        if (n->st.compare_exchange_strong(
+                expect, __inner__::timer_node::EXPIRED))
+        { // 赢得仲裁, 负责唯一的唤醒. 此刻正在本线程处理完成事件
+          // (调度器调用栈上), 直接恢复协程执行即可 (与框架处理其他
+          // 完成事件的方式一致); 不能投 sync_list 稍后处理, 否则
+          // 线程收尾检查先于队列消费执行, 睡眠协程会被遗弃.
+            resume(NODE2ADDR(n->prom));
+        } // 输者 (已被 wake 抢先唤醒): 由 wake 负责恢复, 无需处理.
+    }
+    timer_refresh();
+}
+
+/// 维护"针对堆顶时刻的超时请求": 需要时取消旧请求并提交新请求.
+/// 幂等, 可从任意路径调用 (睡眠协程 / 完成事件处理 / 线程收尾检查).
+void thread_co_env::timer_refresh()
+{
+    auto &heap = *(std::vector<__inner__::timer_node *> *)timer_heap;
+    if (heap.empty())
+    { // 没有睡眠者: 取消未决的超时请求, 让线程能退出调度循环.
+        if (timer_inflight > 0)
+        {
+            auto sqe = get_sqe();
+            if (sqe == nullptr)
+            { // 提交队列满: 记下待重试, 由调度循环兜底
+                // (旧请求即使睡满自然完成, 处理也是幂等的).
+                timer_arm_pending = true;
+                return;
+            }
+            io_uring_prep_cancel64(sqe, timer_armed_user_data, 0);
+            sqe->user_data = 0; // 取消请求自身的完成事件无需处理.
+        }
+        timer_arm_pending = false;
+        return;
+    }
+    i64 top = heap.front()->deadline_ns;
+    if (timer_inflight > 0 && top >= timer_armed_deadline &&
+        !timer_arm_pending)
+    { // 未决请求的目标时刻不晚于堆顶, 无需更新.
+        return;
+    }
+    if (timer_inflight > 0)
+    { // 堆顶时刻更早: 取消旧请求. 取消落空 (旧请求恰好已完成) 也无妨,
+        // 完成事件的处理是幂等的.
+        auto sqe = get_sqe();
+        if (sqe != nullptr)
+        {
+            io_uring_prep_cancel64(sqe, timer_armed_user_data, 0);
+            sqe->user_data = 0;
+        }
+    }
+    auto sqe = get_sqe();
+    if (sqe == nullptr)
+    { // 提交队列满: 记下待重试. 睡眠者已挂起, 不依赖请求提交成功.
+        SYSWRN("timer arm deferred, sqe exhausted");
+        timer_arm_pending = true;
+        return;
+    }
+    i64 remain = top - mono_now_ns();
+    if (remain < 0)
+    {
+        remain = 0; // 堆顶已过期: 零时长使请求立即完成.
+    }
+    // 时长缓冲区须存活到内核提交; 本线程对超时请求的提交是串行的,
+    // 单缓冲足够, 连续覆盖最多造成一次多余的幂等处理.
+    auto ts = (struct __kernel_timespec *)timer_ts;
+    ts->tv_sec = remain / 1'000'000'000LL;
+    ts->tv_nsec = remain % 1'000'000'000LL;
+    u64 ud = (++timer_gen << 8) | 2;
+    io_uring_prep_timeout(sqe, ts, 0, 0);
+    sqe->user_data = ud;
+    timer_armed_user_data = ud;
+    timer_armed_deadline = top;
+    ++timer_inflight;
+    timer_arm_pending = false;
 }
 
 int push_sync_node_to_thread(uco::task<void>::promise_type *node)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <google/protobuf/message.h>
@@ -38,32 +39,51 @@ namespace uco
 
 void OpenLog(const std::string& module_name, LogLevel level, LogMode mode, bool enable_syslog);
 
-// 包含变量名
+// ==================== 函数式日志 (无 文件名:行号/函数 定位信息) ====================
+// fmt 与实参匹配经 format 属性静态检查, 不匹配时编译告警;
+// 实参须为 printf 兼容类型 (C++ 对象需 .c_str() 等).
+// 适用于对齐敏感的日志, 如请求访问日志.
+__attribute__((format(printf, 1, 2))) void SysDbg(const char *fmt, ...);
+__attribute__((format(printf, 1, 2))) void SysMsg(const char *fmt, ...);
+__attribute__((format(printf, 1, 2))) void SysWrn(const char *fmt, ...);
+__attribute__((format(printf, 1, 2))) void SysErr(const char *fmt, ...);
+__attribute__((format(printf, 1, 2))) void SysFtl(const char *fmt, ...);
+
+__attribute__((format(printf, 1, 2))) void LogDbg(const char *fmt, ...);
+__attribute__((format(printf, 1, 2))) void LogMsg(const char *fmt, ...);
+__attribute__((format(printf, 1, 2))) void LogWrn(const char *fmt, ...);
+__attribute__((format(printf, 1, 2))) void LogErr(const char *fmt, ...);
+__attribute__((format(printf, 1, 2))) void LogFtl(const char *fmt, ...);
+
+// 使用此宏，对象化日志会包含变量名
 #define NR(X) X
 
+// 对象化日志 API
 #define SYSDBG(...) uco::__inner__::Logger((int)0, LogLevel::DEBUG, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)
 #define SYSMSG(...) uco::__inner__::Logger((int)0, LogLevel::INFO,  uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)
 #define SYSWRN(...) uco::__inner__::Logger((int)0, LogLevel::WARN,  uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)
 #define SYSERR(...) uco::__inner__::Logger((int)0, LogLevel::ERROR, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)
 #define SYSFTL(...) uco::__inner__::Logger((int)0, LogLevel::FATAL, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)
-
 #define LOGDBG(...) uco::__inner__::Logger((int)1, LogLevel::DEBUG, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)
 #define LOGMSG(...) uco::__inner__::Logger((int)1, LogLevel::INFO,  uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)
 #define LOGWRN(...) uco::__inner__::Logger((int)1, LogLevel::WARN,  uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)
 #define LOGERR(...) uco::__inner__::Logger((int)1, LogLevel::ERROR, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)
 #define LOGFTL(...) uco::__inner__::Logger((int)1, LogLevel::FATAL, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, #__VA_ARGS__, ##__VA_ARGS__)
 
+// 格式化日志 API
 #define SYSDBGF(fmt, ...) uco::__inner__::LoggerF((int)0, LogLevel::DEBUG, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, fmt, ##__VA_ARGS__)
 #define SYSMSGF(fmt, ...) uco::__inner__::LoggerF((int)0, LogLevel::INFO,  uco::__inner__::basefilename(__FILE__), __func__, __LINE__, fmt, ##__VA_ARGS__)
 #define SYSWRNF(fmt, ...) uco::__inner__::LoggerF((int)0, LogLevel::WARN,  uco::__inner__::basefilename(__FILE__), __func__, __LINE__, fmt, ##__VA_ARGS__)
 #define SYSERRF(fmt, ...) uco::__inner__::LoggerF((int)0, LogLevel::ERROR, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, fmt, ##__VA_ARGS__)
 #define SYSFTLF(fmt, ...) uco::__inner__::LoggerF((int)0, LogLevel::FATAL, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, fmt, ##__VA_ARGS__)
-
 #define LOGDBGF(fmt, ...) uco::__inner__::LoggerF((int)1, LogLevel::DEBUG, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOGMSGF(fmt, ...) uco::__inner__::LoggerF((int)1, LogLevel::INFO,  uco::__inner__::basefilename(__FILE__), __func__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOGWRNF(fmt, ...) uco::__inner__::LoggerF((int)1, LogLevel::WARN,  uco::__inner__::basefilename(__FILE__), __func__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOGERRF(fmt, ...) uco::__inner__::LoggerF((int)1, LogLevel::ERROR, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOGFTLF(fmt, ...) uco::__inner__::LoggerF((int)1, LogLevel::FATAL, uco::__inner__::basefilename(__FILE__), __func__, __LINE__, fmt, ##__VA_ARGS__)
+
+// 无 文件名:行号/函数名 的日志见上方函数式 API (SysDbg/LogErr 等),
+// 直接函数调用, fmt 静态检查, 无需宏.
 
 // ==================== STL container operator<< overloads ====================
 namespace __inner__
@@ -182,6 +202,9 @@ void gen_log_header(uint64_t& timestamp, std::ostringstream& sLog, std::vector<s
   int role, int level, const std::string_view& filename, const char* func, int line, const char* varnames);
 void gen_log_header(uint64_t& timestamp, std::ostringstream& sLog, int role, int level, 
                     const std::string_view& filename, const char* func, int line);
+
+// 无定位信息 (文件名:行号/函数) 的日志头.
+void gen_log_header(uint64_t& timestamp, std::ostringstream& sLog, int role, int level);
 void gen_log_tail(std::ostringstream& sLog);
 
 #ifndef PROJECT_SOURCE_DIR
@@ -252,28 +275,14 @@ void Logger(int role, LogLevel level, const std::string_view& filename, const ch
     }
 }
 
-template <class... _Args>
-void LoggerF(int role, LogLevel level, const std::string_view& filename, const char* func, int line,
-             const char* fmt, _Args&&... args)
-{
-    bool bLog = is_need_log(role, level);
-    if (bLog)
-    {
-        uint64_t timestamp = 0;
-        std::ostringstream sLog;
-        gen_log_header(timestamp, sLog, role, (int)level, filename, func, line);
-        int len = snprintf(nullptr, 0, fmt, std::forward<_Args>(args)...);
-        if (len > 0)
-        {
-            std::vector<char> buf(static_cast<size_t>(len) + 1);
-            snprintf(buf.data(), buf.size(), fmt, std::forward<_Args>(args)...);
-            sLog << buf.data();
-        }
-        gen_log_tail(sLog);
-        std::string log = sLog.str();
-        process_log(level, timestamp, log);
-    }
-}
+// printf 风格日志: fmt 与实参的匹配经 format 属性静态检查,
+// 不匹配时编译告警. 实参须为 printf 兼容类型 (C++ 对象需 .c_str() 等).
+__attribute__((format(printf, 6, 7)))
+void LoggerF(int role, LogLevel level, const std::string_view& filename,
+             const char* func, int line, const char* fmt, ...);
+
+// 无定位信息日志核心 (函数式日志 SysDbg/LogErr 等转发至此).
+void LoggerNoLocV(int role, LogLevel level, const char *fmt, va_list ap);
 
 };
 

@@ -12,7 +12,8 @@ using namespace std::chrono_literals;
 // ==================== 基础命令: set/get/nil/二进制/注入 ====================
 task<void> demo1(uredis::upool &pool)
 {
-    auto *c = co_await pool.acquire();
+    auto *c = co_await pool.Acquire();
+    uredis::UredisGuard guard(c);
     if (c == nullptr)
     {
         LOGERR("acquire failed");
@@ -41,14 +42,13 @@ task<void> demo1(uredis::upool &pool)
     co_await uredis::uset(c, "uco:test:inj", "a b 'c' \"d\" $X");
     gr = co_await uredis::uget(c, "uco:test:inj");
     LOGMSG("injection-safe:", NR(gr.str == "a b 'c' \"d\" $X"));
-
-    pool.release(c);
 }
 
 // ==================== 数组回复/整数/服务端错误 ====================
 task<void> demo2(uredis::upool &pool)
 {
-    auto *c = co_await pool.acquire();
+    auto *c = co_await pool.Acquire();
+    uredis::UredisGuard guard(c);
     if (c == nullptr)
     {
         LOGERR("acquire failed");
@@ -85,8 +85,6 @@ task<void> demo2(uredis::upool &pool)
                                         "uco:test:str", "uco:test:bin",
                                         "uco:test:inj"});
     LOGMSG("del:", dr.integer);
-
-    pool.release(c);
 }
 
 // ==================== 分布式锁 ====================
@@ -94,16 +92,16 @@ task<void> demo2(uredis::upool &pool)
 /// 阻塞抢锁方: 等 releaser 放锁后 acquire 成功.
 task<void> lock_waiter(uredis::ulock &l)
 {
-    auto ok = co_await l.acquire({2, 0});
-    LOGMSG("blocking acquire:", NR(ok), "owns:", NR(l.owns()));
-    co_await l.release();
+    auto ok = co_await l.Acquire({2, 0});
+    LOGMSG("blocking acquire:", NR(ok), "owns:", NR(l.Owns()));
+    co_await l.Release();
 }
 
 /// 延迟放锁方: 300ms 后释放.
 task<void> lock_releaser(uredis::ulock &l)
 {
     co_await uco_sleep(300ms);
-    auto ok = co_await l.release();
+    auto ok = co_await l.Release();
     LOGMSG("delayed release:", NR(ok));
 }
 
@@ -118,23 +116,23 @@ task<void> demo_lock()
     uredis::ulock l2(cfg);
 
     // 互斥.
-    LOGMSG("l1 acquire:", NR(co_await l1.try_acquire()));
-    LOGMSG("l2 blocked:", NR(co_await l2.try_acquire()));
-    LOGMSG("l1 release:", NR(co_await l1.release()));
-    LOGMSG("l1 double release:", NR(co_await l1.release()));
-    LOGMSG("l2 acquire after release:", NR(co_await l2.try_acquire()));
-    co_await l2.release();
+    LOGMSG("l1 acquire:", NR(co_await l1.TryAcquire()));
+    LOGMSG("l2 blocked:", NR(co_await l2.TryAcquire()));
+    LOGMSG("l1 release:", NR(co_await l1.Release()));
+    LOGMSG("l1 double release:", NR(co_await l1.Release()));
+    LOGMSG("l2 acquire after release:", NR(co_await l2.TryAcquire()));
+    co_await l2.Release();
 
     // 阻塞获取: l2 持有, releaser 300ms 后放, waiter 阻塞等到.
     // 两个子协程进同一 cobatch, run() 返回 = 均已结束, 锁静止, 可安全关闭.
-    LOGMSG("l2 re-acquire:", NR(co_await l2.try_acquire()));
+    LOGMSG("l2 re-acquire:", NR(co_await l2.TryAcquire()));
     cobatch batch(2);
     batch.add(lock_releaser(l2));
     batch.add(lock_waiter(l1));
     co_await batch.run();
 
-    l1.close();
-    l2.close();
+    l1.Close();
+    l2.Close();
 }
 
 // ==================== 看门狗: 持有时长超过 ttl 仍存活 ====================
@@ -146,13 +144,13 @@ task<void> demo_watchdog()
     cfg.renew_interval_ms = 500; // 看门狗 500ms 续期.
 
     uredis::ulock l(cfg);
-    LOGMSG("wd acquire:", NR(co_await l.try_acquire()));
+    LOGMSG("wd acquire:", NR(co_await l.TryAcquire()));
     co_await uco_sleep(3200ms); // 睡 3.2s > ttl 2s.
-    LOGMSG("wd still owns after ttl:", NR(l.owns()));
-    LOGMSG("wd manual renew:", NR(co_await l.renew()));
-    LOGMSG("wd release:", NR(co_await l.release()));
-    LOGMSG("wd not owns after release:", NR(!l.owns()));
-    l.close();
+    LOGMSG("wd still owns after ttl:", NR(l.Owns()));
+    LOGMSG("wd manual renew:", NR(co_await l.ReNew()));
+    LOGMSG("wd release:", NR(co_await l.Release()));
+    LOGMSG("wd not owns after release:", NR(!l.Owns()));
+    l.Close();
 }
 
 // ==================== 入口 ====================
@@ -162,13 +160,14 @@ task<void> demo()
     cfg.max_size = 4;
     cfg.min_idle = 1;
     cfg.reap_interval_ms = 2'000;
-    auto &pool = uredis::upool::GetInstance(cfg);
+    auto&& pool = uredis::upool::GetInstance();
+    pool.Init(cfg);
 
     cobatch batchrunner(5);
     batchrunner.add(demo1(pool));
     batchrunner.add(demo2(pool));
     co_await batchrunner.run();
-    pool.close();
+    pool.Close();
 
     co_await demo_lock();
     co_await demo_watchdog();

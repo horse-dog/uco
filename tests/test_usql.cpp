@@ -1,13 +1,15 @@
 #include "ulog.h"
 #include "usql.h"
 #include "user.pb.h"
+#include <chrono>
 #include <vector>
 
 using namespace uco;
 
 task<void> demo1(usql::upool& pool)
 {
-    MYSQL *m = co_await pool.acquire();
+    MYSQL *m = co_await pool.Acquire();
+    usql::UsqlGuard guard(m);
     if (m == nullptr)
     {
         LOGERR("acquire failed");
@@ -20,15 +22,15 @@ task<void> demo1(usql::upool& pool)
     if (!ret)
     {
         LOGERR("uselect error");
-        co_return; // 傻逼AI，co_return 不释放.
+        co_return;
     }
     LOGMSG("result:", users);
-    pool.release(m);
 }
 
 task<void> demo2(usql::upool& pool)
 {
-    MYSQL *m = co_await pool.acquire();
+    MYSQL *m = co_await pool.Acquire();
+    usql::UsqlGuard guard(m);
     if (m == nullptr)
     {
         LOGERR("acquire failed");
@@ -44,12 +46,12 @@ task<void> demo2(usql::upool& pool)
         co_return;
     }
     LOGMSG("result:", user);
-    pool.release(m);
 }
 
 task<void> demo3(usql::upool& pool)
 {
-    MYSQL *m = co_await pool.acquire();
+    MYSQL *m = co_await pool.Acquire();
+    usql::UsqlGuard guard(m);
     if (m == nullptr)
     {
         LOGERR("acquire failed");
@@ -64,7 +66,6 @@ task<void> demo3(usql::upool& pool)
 
     auto txn = co_await usql::utransaction(m, options);
     LOGMSG("txn committed =", NR(txn.committed));
-    pool.release(m);
 }
 
 // 连接池正常用法.
@@ -78,14 +79,16 @@ task<void> demo()
     cfg.max_size = 4;
     cfg.reap_interval_ms = 2'000;
     cfg.min_idle = 1;
-    auto &pool = usql::upool::GetInstance(cfg);
+    auto&& pool = usql::upool::GetInstance();
+    pool.Init(cfg);
 
     cobatch batchrunner(5);
     batchrunner.add(demo1(pool));
     batchrunner.add(demo2(pool));
     batchrunner.add(demo3(pool));
     co_await batchrunner.run();
-    pool.close();
+    co_await uco_sleep(std::chrono::seconds(5)); // 等待 reaper 缩容, 观察日志.
+    pool.Close();
 }
 
 int main()

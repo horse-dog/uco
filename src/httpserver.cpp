@@ -19,7 +19,7 @@
 #include "ulog.h"
 #include "uredis.h"
 #include "usql.h"
-#include "utils/string_utils.h"
+#include "string_utils.h"
 
 HttpContext::HttpContext(
     HttpRequest *ptrReq, HttpResponse *ptrRsp,
@@ -686,22 +686,27 @@ void HttpServer::Init(int port, int num_threads, int keepalivecnt,
     setup_signalfd();
 }
 
+void HttpServer::InitMySqLPool()
+{
+    usql::upool::config config;
+    config.host = "127.0.0.1";
+    config.user = "root";
+    config.pass = "123456";
+    config.db = "webserver";
+    config.max_size = 16;
+    usql::upool::GetInstance().Init(config);
+}
+void HttpServer::InitRedisPool()
+{
+    uredis::upool::config config;
+    config.max_size = 16;
+    uredis::upool::GetInstance().Init(config);
+}
+
 void HttpServer::Run()
 {
-    // TODO: 放这里不太好.
-    {
-        usql::upool::config mysql;
-        mysql.host = "127.0.0.1";
-        mysql.user = "root";
-        mysql.pass = "123456";
-        mysql.db = "webserver";
-        mysql.max_size = 16;
-        usql::upool::GetInstance(mysql);
-
-        uredis::upool::config redis;
-        redis.max_size = 16;
-        uredis::upool::GetInstance(redis);
-    }
+    InitMySqLPool();
+    InitRedisPool();
 
     for (int i = 1; i < m_iNumThreads; i++)
     {
@@ -811,9 +816,8 @@ uco::task<void> HttpServer::peek_exit()
         LOGDBG("xread ret %zd", s);
     }
 
-    // TODO: 放这里貌似不太好.
-    usql::upool::GetInstance().close();
-    uredis::upool::GetInstance().close();
+    usql::upool::GetInstance().Close();
+    uredis::upool::GetInstance().Close();
     co_return;
 }
 

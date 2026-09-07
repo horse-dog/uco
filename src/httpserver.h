@@ -165,6 +165,9 @@ class HttpServer
     uco::task<void> peek_exit();
     static HttpMethod HttpMethodStr2Enum(const std::string &method);
 
+    void InitMySqLPool();
+    void InitRedisPool();
+
     int m_iPort = 0;
     int m_iNumThreads = 0;
     uco::usema exit_sema;
