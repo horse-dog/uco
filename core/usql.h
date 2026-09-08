@@ -34,14 +34,61 @@
 namespace usql
 {
 
+/// usql 错误码 (SqlError::err_no 取值地图):
+///   负值 = 系统错误 (err_no != 0 即出错):
+///     -200/-201 = usql 框架自身;
+///     其余负值 = MySQL 原生错误码取负 (值为 -原码, 服务端
+///     mysqld_error.h / 客户端 errmsg.h, 常用者已具名,
+///     未具名的取负后对照官方错误码表).
+///   正值预留给上层业务逻辑码 (usql 层不产生).
+enum UsqlError
+{
+    // ---- usql 框架自身 ----
+    kBadArgument = -200, ///< 参数非法/列与 proto 不对齐/绑定失败 (见 err_msg).
+    kTimeout     = -201, ///< 操作超时 (timeout 字段同时置位).
+
+    // ---- MySQL 服务端 (mysqld_error.h, 值为原码取负) ----
+    kAccessDenied        = -1045, ///< ER_ACCESS_DENIED_ERROR 账号/密码/权限拒绝.
+    kUnknownDatabase     = -1049, ///< ER_BAD_DB_ERROR 库不存在.
+    kTableExists         = -1050, ///< ER_TABLE_EXISTS_ERROR 表已存在.
+    kBadField            = -1054, ///< ER_BAD_FIELD_ERROR 未知列.
+    kDuplicateEntry      = -1062, ///< ER_DUP_ENTRY 唯一键冲突.
+    kParseError          = -1064, ///< ER_PARSE_ERROR SQL 语法错误.
+    kNoSuchTable         = -1146, ///< ER_NO_SUCH_TABLE 表不存在.
+    kLockWaitTimeout     = -1205, ///< ER_LOCK_WAIT_TIMEOUT 锁等待超时.
+    kLockDeadlock        = -1213, ///< ER_LOCK_DEADLOCK 死锁 (可重试).
+    kTruncatedWrongValue = -1292, ///< ER_TRUNCATED_WRONG_VALUE 值格式错/被截断.
+    kDataTooLong         = -1406, ///< ER_DATA_TOO_LONG 数据超列长.
+    kRowIsReferenced     = -1451, ///< ER_ROW_IS_REFERENCED_2 外键约束, 行被引用.
+    kForeignKeyNoParent  = -1452, ///< ER_NO_REFERENCED_ROW_2 外键约束, 父行不存在.
+
+    // ---- MySQL 客户端 (errmsg.h, 值为原码取负) ----
+    kConnHostError = -2003, ///< CR_CONN_HOST_ERROR 连不上服务器.
+    kUnknownHost   = -2005, ///< CR_UNKNOWN_HOST 主机名解析失败.
+    kServerGone    = -2006, ///< CR_SERVER_GONE_ERROR 服务器已断开.
+    kOutOfMemory   = -2008, ///< CR_OUT_OF_MEMORY 客户端内存耗尽.
+    kServerLost    = -2013, ///< CR_SERVER_LOST 查询期间连接丢失.
+};
+
 /// 操作错误信息.
 struct SqlError
 {
     bool ok = true;           ///< 是否成功.
     bool timeout = false;     ///< 是否超时失败.
-    unsigned int err_no = 0;  ///< 错误码.
+    int err_no = 0;           ///< 0 成功; 负值 = 系统错误 (框架 -200/-201,
+                              ///< MySQL 原码取负, 见 UsqlError 枚举);
+                              ///< 正值预留给上层业务逻辑码.
     std::string err_msg;      ///< 错误描述.
     std::string sqlstate;     ///< SQLSTATE.
+
+    /**
+     * @brief 是否瞬态错误 (重试有成功可能).
+     *        可重试: 超时 / MySQL 客户端连接类 (原码 2xxx) / 死锁 /
+     *                锁等待超时;
+     *        不可重试: 服务端逻辑错误 (语法/表结构等, 属开发期问题)
+     *                及 usql 框架错误.
+     */
+    bool Retryable() const;
 };
 
 /// INSERT 结果.
@@ -141,43 +188,72 @@ uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
                                 uco_time_t ts = {10, 0});
 
 /**
- * @brief 异步 SELECT, 结果集绑定到 pb 对象.
- * @param out 单条形态: 绑定首行 (先清空, 多余行忽略, 空结果集不修改).
- * @return 是否成功; 列与字段须同名且类型兼容, 违者 false.
+ * @brief 异步 SELECT, 结果集绑定到 pb 对象 (单条形态).
+ * @param out 无行时不修改; 有行时先清空再绑定首行 (多余行忽略).
+ * @return res.ok=false: 执行/对齐/绑定失败 (err_msg 有详情);
+ *         res.ok=true && num_rows==0: 无行 (out 未修改);
+ *         res.ok=true && num_rows>=1: 首行已绑定到 out
+ *         (rows 已释放, 数据只在 out, 勿再取 rows).
+ * @note 列与字段须同名且类型兼容, 违者 ok=false.
  */
-uco::task<bool> uselect(MYSQL *mysql, std::string sql,
-                        google::protobuf::Message *out,
-                        uco_time_t ts = {10, 0});
+uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
+                                google::protobuf::Message *out,
+                                uco_time_t ts = {10, 0});
 
 /**
  * @brief 异步 SELECT, 结果集逐行填入 repeated 字段.
- * @param out 如 resp.mutable_users(), 原有内容先清空.
- * @return 是否成功, 语义同单条形态.
- * @note 必须为模板: RepeatedPtrField 私有继承内部基类且无运行时
- *       类型信息, 元素类型只能编译期获知.
+ * @param out 如 resp.mutable_users(), 原有内容先清空; 失败时亦清空.
+ * @return res.ok=false: 执行/对齐/绑定失败 (err_msg 有详情);
+ *         res.ok=true: 全部行已填入 out, 行数即 out->size()
+ *         (rows 已释放, 数据只在 out, 勿再取 rows).
  */
 template <typename T>
-uco::task<bool> uselect(MYSQL *mysql, std::string sql,
-                        google::protobuf::RepeatedPtrField<T> *out,
-                        uco_time_t ts = {10, 0})
+uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
+                                google::protobuf::RepeatedPtrField<T> *out,
+                                uco_time_t ts = {10, 0})
 {
     static_assert(std::is_base_of_v<google::protobuf::Message, T>,
                   "T must be a protobuf message type");
+    // 参数校验先于任何 IO (空 out 解引用 Clear 会直接崩溃).
+    if (out == nullptr)
+    {
+        SelectResult res;
+        res.ok = false;
+        res.err_no = kBadArgument;
+        res.err_msg = "usql: uselect: out is nullptr";
+        co_return res;
+    }
     out->Clear();
     T proto;
     SelectResult res = co_await uselect(mysql, std::move(sql), ts);
-    if (!res.ok || !res.check_alignment(proto.GetDescriptor()))
+    if (!res.ok)
     {
-        co_return false;
+        co_return res; // 执行失败, 原样带错误信息.
+    }
+    if (!res.check_alignment(proto.GetDescriptor()))
+    {
+        // 对齐失败详情已由 check_alignment 记 SYSERR.
+        res.ok = false;
+        res.err_no = kBadArgument;
+        res.err_msg = "usql: uselect: columns not aligned with proto fields";
+        co_return res;
     }
     for (size_t r = 0; r < res.rows.size(); r++)
     {
         if (!res.bind_row(r, *out->Add()))
         {
-            co_return false;
+            // 绑定失败详情已由 bind_row 记 SYSERR; 回滚半填充状态.
+            out->Clear();
+            res.ok = false;
+            res.err_no = kBadArgument;
+            res.err_msg = "usql: uselect: bind row failed";
+            co_return res;
         }
     }
-    co_return true;
+    // 数据已全部转入 out, 释放原始行 (num_rows 保留).
+    res.rows.clear();
+    res.rows.shrink_to_fit();
+    co_return res;
 }
 
 // ==================== 事务 ====================

@@ -16,15 +16,15 @@ task<void> demo1(usql::upool& pool)
         co_return;
     }
 
-    TBUserList users;
+    UserList users;
 
     auto ret = co_await usql::uselect(m, "SELECT * FROM user", users.mutable_userlist());
-    if (!ret)
+    if (!ret.ok)
     {
-        LOGERR("uselect error");
+        LOGERR("uselect error:", ret.err_msg);
         co_return;
     }
-    LOGMSG("result:", users);
+    LOGMSG("rows:", ret.num_rows, ", result:", users);
 }
 
 task<void> demo2(usql::upool& pool)
@@ -37,12 +37,17 @@ task<void> demo2(usql::upool& pool)
         co_return;
     }
 
-    TBUser user;
+    User user;
 
     auto ret = co_await usql::uselect(m, "SELECT * FROM `user` WHERE username = 'root'", &user);
-    if (!ret)
+    if (!ret.ok)
     {
-        LOGERR("uselect error");
+        LOGERR("uselect error:", ret.err_msg);
+        co_return;
+    }
+    if (ret.num_rows == 0)
+    {
+        LOGERR("no data");
         co_return;
     }
     LOGMSG("result:", user);

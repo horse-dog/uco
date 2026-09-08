@@ -1,10 +1,5 @@
 syntax = "proto3";
 
-message User {
-  string username = 1;
-  int32 age = 2;
-}
-
 message Address {
   string street = 1;
   string city = 2;
@@ -16,12 +11,19 @@ message JokeTemplate {
   repeated Address addresses = 3;
 }
 
-message TBUser {
+message User {
   uint64 vid = 1;
   string username = 2;
   string password = 3;
 }
 
-message TBUserList {
-  repeated TBUser userlist = 1;
+message UserList {
+  repeated User userlist = 1;
+}
+
+// 对外响应模型 (不含 password, 防密文回显);
+// User (表镜像, 含密文) 仅供 service 内部使用.
+message UserInfo {
+  uint64 vid = 1;
+  string username = 2;
 }

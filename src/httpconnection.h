@@ -52,7 +52,7 @@ class HttpConnection
     uco::task<void> GenErrorPage(int code);
 
     // 正常请求的处理流程，异常信息通过 sErrMsg 带回，响应头由 Process 统一生成.
-    uco::task<void> HandleRequest(std::string &sErrMsg);
+    uco::task<void> HandleRequest(std::string &sErrMsg, bool& bLog);
 
     int m_iSocket;
     sockaddr_in m_sockAddr;

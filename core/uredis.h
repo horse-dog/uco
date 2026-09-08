@@ -16,6 +16,7 @@
 #include "usync.h"
 
 #include <atomic>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -31,13 +32,48 @@ namespace uredis
 /// 连接句柄 (实现细节隐藏在 uredis.cpp).
 struct uconnection;
 
+/// uredis 错误码 (RedisError::err_no 取值地图):
+///   负值 = 系统错误:
+///     -200/-201 = 框架自身 (参数非法/超时);
+///     -1 ~ -133 = 传输层 errno 取负 (ECONNRESET 等, 常见者已具名);
+///     -300      = Redis 服务端错误回复 (RESP 无数字码, 见 err_msg);
+///   正值预留给上层业务逻辑码.
+enum UredisError
+{
+    // ---- 框架自身 ----
+    kBadArgument = -200, ///< 参数非法 (空参数/连接无效).
+    kTimeout     = -201, ///< 应用层超时 (timeout 字段同时置位;
+                         ///<  区别于内核 TCP 超时 kTcpTimedout).
+
+    // ---- 传输层 errno 取负 (常见者具名, 值为 -errno) ----
+    kConnReset    = -ECONNRESET,   ///< 对端重置连接 (Redis 重启/崩溃).
+    kBrokenPipe   = -EPIPE,        ///< 写已关闭的连接.
+    kTcpTimedout  = -ETIMEDOUT,    ///< 内核级 TCP 重传超时 (网络黑洞).
+    kConnRefused  = -ECONNREFUSED, ///< 连接被拒 (Redis 未启动/端口错).
+    kHostUnreach  = -EHOSTUNREACH, ///< 主机不可达.
+    kNetUnreach   = -ENETUNREACH,  ///< 网络不可达.
+    kConnAborted  = -ECONNABORTED, ///< 连接中止.
+    kNotConnected = -ENOTCONN,     ///< 连接未建立.
+
+    // ---- 服务端 ----
+    kServerError = -300, ///< Redis 服务端错误回复 (WRONGTYPE 等, 见 err_msg).
+};
+
 /// 操作错误信息.
 struct RedisError
 {
     bool ok = true;        ///< 是否成功.
     bool timeout = false;  ///< 是否超时失败.
-    int err_no = 0;        ///< 错误码 (errno / -1 服务端错误).
+    int err_no = 0;        ///< 0 成功; 负值 = 系统错误 (见 UredisError 枚举);
+                           ///< 正值预留给上层业务逻辑码.
     std::string err_msg;   ///< 错误描述.
+
+    /**
+     * @brief 是否瞬态错误 (重试有成功可能).
+     *        可重试: 超时 / 传输层错误 (连接断, 重连即可);
+     *        不可重试: 服务端错误 (WRONGTYPE 等, 重试同错) / 参数非法.
+     */
+    bool Retryable() const;
 };
 
 /// RESP 回复.

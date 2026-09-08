@@ -420,7 +420,7 @@ static std::string peer_to_string(const sockaddr_in &addr)
 // 正常请求的处理流程（解析已通过）.
 // 提前结束的分支只需设置好响应内容后 co_return，
 // 异常信息写入 sErrMsg 由调用方记录，响应头统一由 Process() 生成.
-uco::task<void> HttpConnection::HandleRequest(std::string &sErrMsg)
+uco::task<void> HttpConnection::HandleRequest(std::string &sErrMsg, bool& bLog)
 {
     m_httpResponse.SetHttpRetCode(200);
     m_httpResponse.SetKeepAlive(m_httpRequest.m_bKeepAlive);
@@ -493,6 +493,8 @@ uco::task<void> HttpConnection::HandleRequest(std::string &sErrMsg)
             m_httpResponse.SetKeepAlive(false);
             m_httpResponse.ShouldGenErrorPage(500);
         }
+
+        bLog = ctx.GenLog();
     }
     else
     {
@@ -587,6 +589,7 @@ uco::task<bool> HttpConnection::Process()
     const std::string sUrl = m_httpRequest.m_sPath;
     const std::string sPeer = peer_to_string(m_sockAddr);
     std::string sErrMsg;
+    bool bLog = true;
 
     if (httpStatus == HttpRequest::eRequestBad)
     {
@@ -595,7 +598,7 @@ uco::task<bool> HttpConnection::Process()
     }
     else
     {
-        co_await HandleRequest(sErrMsg);
+        co_await HandleRequest(sErrMsg, bLog);
     }
 
     // 统一生成响应头: 所有分支共用，新增分支无需手动调用.
@@ -607,9 +610,12 @@ uco::task<bool> HttpConnection::Process()
         std::chrono::steady_clock::now() - tpStart);
     const int code = m_httpResponse.m_iHttpRetCode;
     const std::string msg = sErrMsg.empty() ? http_status_text(code) : sErrMsg;
-    LOGMSGF(
-      "%s URL(%s) IP(%s) RET(%d) COST(%dms) MSG: %s",
-      sMethod.c_str(), sUrl.c_str(), sPeer.c_str(), code, (int)costMs.count(), msg.c_str()
-    );
+    if (bLog)
+    {
+        LOGMSGF(
+            "%s URL(%s) IP(%s) RET(%d) COST(%dms) MSG: %s",
+            sMethod.c_str(), sUrl.c_str(), sPeer.c_str(), code, (int)costMs.count(), msg.c_str()
+        );
+    }
     co_return true;
 }

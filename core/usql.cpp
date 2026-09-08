@@ -6,8 +6,11 @@
 #include <google/protobuf/message.h>
 #include <google/protobuf/reflection.h>
 
+#include <mysql/errmsg.h> // CR_SERVER_LOST (客户端错误码 2013)
+
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <functional>
 #include <liburing.h>
 #include <poll.h>
@@ -61,16 +64,30 @@ static void fill_error(SqlError &e, MYSQL *mysql, int r, const char *op,
     if (r == -ETIME)
     {
         e.timeout = true;
-        e.err_no = ETIME;
+        e.err_no = kTimeout;
         e.err_msg = "usql: operation timeout";
+        // 超时后流已失步 (服务端响应可能迟到, 错配下一条命令),
+        // 连接不可复用; mysql_errno() 读的就是 net.last_errno, 直接
+        // 写入客户端错误码, Release 现有的 ">= 2000 销毁" 判定自动
+        // 生效, 无需额外机制 (风格同 get_mysql_fd 直访 net.fd).
+        mysql->net.last_errno = CR_SERVER_LOST;
+        snprintf(mysql->net.last_error, sizeof(mysql->net.last_error),
+                 "usql: operation timeout, stream desynced");
         SYSWRN("usql:", op, "timeout, elapsed_ms:", elapsed);
         return;
     }
-    e.err_no = mysql_errno(mysql);
+    e.err_no = -(int)mysql_errno(mysql); // MySQL 原码取负 (见 UsqlError).
     e.err_msg = mysql_error(mysql);
     e.sqlstate = mysql_sqlstate(mysql);
     SYSERR("usql:", op, "failed, errno:", e.err_no, "msg:", e.err_msg,
            "sqlstate:", e.sqlstate, "elapsed_ms:", elapsed);
+}
+
+bool SqlError::Retryable() const
+{
+    return timeout || err_no == kTimeout ||
+           (err_no <= -2000 && err_no > -3000) || // MySQL 客户端连接类.
+           err_no == kLockDeadlock || err_no == kLockWaitTimeout;
 }
 
 /// io_uring poll_add 监听 fd 事件.
@@ -648,24 +665,51 @@ bool SelectResult::bind_row(size_t row_idx,
     return true;
 }
 
-uco::task<bool> uselect(MYSQL *mysql, std::string sql,
-                        google::protobuf::Message *out, uco_time_t ts)
+uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
+                                google::protobuf::Message *out,
+                                uco_time_t ts)
 {
+    // 参数校验先于任何 IO (空 out 不该白跑一次查询).
     if (out == nullptr)
     {
-        co_return false;
+        SelectResult ret;
+        ret.ok = false;
+        ret.err_no = kBadArgument;
+        ret.err_msg = "usql: uselect: out is nullptr";
+        co_return ret;
     }
     SelectResult ret = co_await uselect(mysql, std::move(sql), ts);
-    if (!ret.ok || !ret.check_alignment(out->GetDescriptor()))
+    if (!ret.ok)
     {
-        co_return false;
+        co_return ret; // 执行失败, 原样带错误信息.
     }
-    if (ret.rows.empty())
+
+    if (!ret.check_alignment(out->GetDescriptor()))
     {
-        co_return false;
+        // 对齐失败详情已由 check_alignment 记 SYSERR.
+        ret.ok = false;
+        ret.err_no = kBadArgument;
+        ret.err_msg = "usql: uselect: columns not aligned with proto fields";
+        co_return ret;
     }
-    out->Clear();
-    co_return ret.bind_row(0, *out);
+
+    if (!ret.rows.empty())
+    {
+        out->Clear();
+        if (!ret.bind_row(0, *out))
+        {
+            // 绑定失败详情已由 bind_row 记 SYSERR.
+            ret.ok = false;
+            ret.err_no = kBadArgument;
+            ret.err_msg = "usql: uselect: bind row failed";
+            co_return ret;
+        }
+        // 数据已转入 out, 释放原始行, 避免双份快照
+        // (num_rows 保留, 供三态判断: 0=无行, >=1=已绑定).
+        ret.rows.clear();
+        ret.rows.shrink_to_fit();
+    }
+    co_return ret;
 }
 
 // ==================== 事务 ====================

@@ -20,6 +20,7 @@
 #include "uredis.h"
 #include "usql.h"
 #include "string_utils.h"
+#include "url.h"
 
 HttpContext::HttpContext(
     HttpRequest *ptrReq, HttpResponse *ptrRsp,
@@ -291,7 +292,72 @@ std::string HttpContext::GetCookie(const std::string& name) const
         }
         begin = end + 1;
     }
-    return value;
+    // 对齐 gin 的 Cookie(): 读侧对 value 做 URL 反转义.
+    // plus_as_space=false: 与写侧 url_encode 闭环 (%XX 风格, 不会产生裸 '+';
+    // gin 用 QueryUnescape 是因为其写侧 QueryEscape 把空格编成 '+').
+    // 非法 % 序列按字面保留 (gin 则返回空串, 此处更宽容).
+    return url_decode(value, false);
+}
+
+// path 空则默认 "/"; value 走 URL 转义 (QueryEscape);
+// MaxAge 三态 (>0 存活秒数 / <0 删除 / =0 会话 cookie, 无 Max-Age 属性);
+// SameSite 取 Context 级 SetSameSite 的暂存值.
+// 属性输出顺序同 Go net/http writeSetCookie.
+// value 的转义与 GetCookie 的反转义构成闭环 (gin: QueryEscape/QueryUnescape).
+void HttpContext::SetCookie(const std::string &name, const std::string &value,
+                            int max_age, const std::string &path,
+                            const std::string &domain, bool secure,
+                            bool http_only)
+{
+    std::string c;
+    c.reserve(name.size() + value.size() + 96);
+    c += name;
+    c += '=';
+    c += url_encode(value);
+
+    c += "; Path=";
+    c += path.empty() ? "/" : path;
+    if (!domain.empty())
+    {
+        c += "; Domain=";
+        c += domain;
+    }
+    if (max_age > 0)
+    {
+        c += "; Max-Age=";
+        c += std::to_string(max_age);
+    }
+    else if (max_age < 0)
+    {
+        c += "; Max-Age=0"; // 负值 = 立即删除 (Go http.Cookie 语义).
+    }
+    // max_age == 0: 不输出 Max-Age 属性 -> 会话 cookie (浏览器关闭失效).
+
+    if (http_only)
+    {
+        c += "; HttpOnly";
+    }
+    if (secure)
+    {
+        c += "; Secure";
+    }
+    switch (m_eSameSite)
+    {
+    case eSameSiteLax:
+        c += "; SameSite=Lax";
+        break;
+    case eSameSiteStrict:
+        c += "; SameSite=Strict";
+        break;
+    case eSameSiteNone:
+        c += "; SameSite=None";
+        break;
+    case eSameSiteDefault:
+    default:
+        break; // 未设置: 不输出.
+    }
+
+    SetHeader("Set-Cookie", std::move(c));
 }
 
 std::string HttpContext::GetRawData()
@@ -733,6 +799,7 @@ void HttpServer::Forward(const std::string &src, const std::string &dst)
 
 static uco::task<void> default_handle(HttpContext *context)
 {
+    context->DisableLog();
     context->File(context->GetRequestUrl());
     co_return;
 }

@@ -258,6 +258,18 @@ class HttpContext
 
     const std::unordered_map<std::string, std::string> &QueryAll() const;
 
+    // SameSite 策略
+    // 设置后作用于后续 SetCookie, 未设置 (eSameSiteDefault) 不输出该属性.
+    enum SameSite
+    {
+        eSameSiteDefault,
+        eSameSiteLax,
+        eSameSiteStrict,
+        eSameSiteNone, // 需配合 secure, 否则浏览器忽略.
+    };
+
+    void SetSameSite(SameSite mode) { m_eSameSite = mode; }
+
     std::string GetCookie(const std::string& name) const;
 
     void SetCookie(const std::string& name, const std::string& value,
@@ -290,12 +302,18 @@ class HttpContext
     // 中止 handler 链.
     void Abort(int httpRetCode, const std::string &msg = "");
 
+    bool GenLog() const { return m_bLog; }
+
+    void DisableLog() { m_bLog = false; }
+
   private:
     class HttpRequest *m_ptrReq = 0;
     class HttpResponse *m_ptrRsp = 0;
     size_t m_iCurHandleIndex = -1;
     bool m_bHasSetRspContent = false;
+    bool m_bLog = true; // 获取静态资源等操作无需日志, 以免刷屏.
     std::vector<HttpServer::HandleFunc> m_handles;
     std::unordered_map<std::string, std::string> m_mapParams;
     std::unordered_map<std::string, std::string> m_mapQueryParams;
+    SameSite m_eSameSite = eSameSiteDefault;
 };

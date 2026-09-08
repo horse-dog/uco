@@ -42,14 +42,14 @@ task<void> middleware3(HttpContext *context)
     co_return;
 }
 
-task<void> hello(HttpContext *context)
-{
-    User user;
-    user.set_username("joker");
-    user.set_age(26);
-    context->Json(200, user);
-    co_return;
-}
+// task<void> hello(HttpContext *context)
+// {
+//     User user;
+//     user.set_username("joker");
+//     user.set_age(26);
+//     context->Json(200, user);
+//     co_return;
+// }
 
 task<void> status_page(HttpContext *context)
 {
@@ -85,15 +85,15 @@ task<void> head(HttpContext *context)
     co_return;
 }
 
-task<void> post(HttpContext *context)
-{
-    User user;
-    context->BindJSON(user);
-    LOGMSG(NR(user.username()));
-    LOGMSG(NR(user));
-    context->Json(200, user);
-    co_return;
-}
+// task<void> post(HttpContext *context)
+// {
+//     User user;
+//     context->BindJSON(user);
+//     LOGMSG(NR(user.username()));
+//     LOGMSG(NR(user));
+//     context->Json(200, user);
+//     co_return;
+// }
 
 int main(int argc, const char *argv[])
 {
@@ -127,12 +127,12 @@ int main(int argc, const char *argv[])
     httpserver.Forward("/video", "/video.html");
     httpserver.Forward("/picture", "/picture.html");
 
-    httpserver.GET("/hello", middleware1, middleware2, middleware3, hello);
+    // httpserver.GET("/hello", middleware1, middleware2, middleware3, hello);
     httpserver.GET("/redirect", redirect);
     httpserver.GET("/status", status_page);
     httpserver.GET("/template", template_page);
     httpserver.HEAD("/head", head);
-    httpserver.POST("/post", post);
+    // httpserver.POST("/post", post);
     httpserver.Init(8080, 4, 100, 30);
     httpserver.Run();
     return 0;

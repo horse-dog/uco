@@ -56,13 +56,15 @@ if(USE_MYSQL)
 endif()
 
 file(GLOB_RECURSE SRC_HTTP "src/*.cpp")
+# 业务层 (controller/service/dao + main); 新增文件需重跑 cmake configure.
+file(GLOB_RECURSE SRC_WEBSERVER "webserver/*.cpp")
 
 add_executable(
     server 
     ${PROTO_SRCS}
     ${PROTO_HDRS}
     ${SRC_HTTP}
-    main.cpp
+    ${SRC_WEBSERVER}
 )
 target_link_libraries(server PRIVATE ulog uco uring)
 if(USE_JEMALLOC)

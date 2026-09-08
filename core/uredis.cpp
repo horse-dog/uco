@@ -174,7 +174,7 @@ struct parser
             if (t == '-')
             { // 服务端错误回复, 连接仍健康.
                 out.ok = false;
-                out.err_no = -1;
+                out.err_no = kServerError;
                 out.err_msg = out.str;
             }
             return 0;
@@ -325,12 +325,20 @@ static void fill_error(RedisError &e, int r)
     if (r == -ETIME)
     {
         e.timeout = true;
-        e.err_no = ETIME;
+        e.err_no = kTimeout;
         e.err_msg = "uredis: operation timeout";
         return;
     }
-    e.err_no = -r;
+    e.err_no = r; // 传输层 errno 取负 (见 UredisError).
     e.err_msg = std::string("uredis: ") + strerror(-r);
+}
+
+bool RedisError::Retryable() const
+{
+    // 可重试: 超时 / 传输层错误 (连接断, 重连即可);
+    // 不可重试: 服务端错误 (重试同错) / 参数非法.
+    return timeout || err_no == kTimeout ||
+           (err_no < 0 && err_no != kBadArgument && err_no != kServerError);
 }
 
 // ==================== 连接 ====================
@@ -432,7 +440,7 @@ uco::task<Reply> ucommand(uconnection *c, std::vector<std::string> args,
     if (c == nullptr || c->fd < 0 || c->broken || args.empty())
     {
         ret.ok = false;
-        ret.err_no = EINVAL;
+        ret.err_no = kBadArgument;
         ret.err_msg = "uredis: invalid connection or empty args";
         co_return ret;
     }
