@@ -36,7 +36,7 @@ UserDao &UserDao::GetInstance()
     if (m == nullptr)                                                      \
     {                                                                      \
         LOGERR("user dao: mysql acquire failed");                          \
-        co_return -2; /* 建连失败, 可重试. */                               \
+        co_return -2;                                                      \
     }                                                                      \
     usql::UsqlGuard guard_##m(m)
 
