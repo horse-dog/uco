@@ -452,8 +452,8 @@ uco::task<void> HttpConnection::HandleRequest(std::string &sErrMsg, bool& bLog)
         co_return;
     }
 
-    // Forward has the highest priority.
-    auto fwdpath = m_pHttpServer->GetForward(sDecodePath);
+    // Forward has the highest priority (按注册的 method 生效).
+    auto fwdpath = m_pHttpServer->GetForward(method, sDecodePath);
     if (!fwdpath.empty())
     {
         m_httpRequest.m_sPath = fwdpath;

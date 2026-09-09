@@ -1,9 +1,9 @@
 /**
- * @file user.cpp
- * @brief user 表数据访问实现, 接口说明见 dao/user.h.
+ * @file user_mysql.cpp
+ * @brief user 表 MySQL 数据访问实现 (MySqlUserDao), 见 dao/user_mysql.h.
  */
 
-#include "user.h"
+#include "user_mysql.h"
 
 #include "ulog.h"
 #include "usql.h" // upool / UsqlGuard / uselect / UsqlError.
@@ -15,10 +15,8 @@ namespace webserver
 namespace dao
 {
 
-UserDao &UserDao::GetInstance()
+MySqlUserDao::MySqlUserDao(usql::upool &pool) : m_pool(pool)
 {
-    static UserDao ins;
-    return ins;
 }
 
 // ---- 内部样板封装 ----
@@ -32,61 +30,64 @@ UserDao &UserDao::GetInstance()
  *       其首个 co_return 时提前归还), co_return 亦无法从子函数冒泡.
  */
 #define USER_DAO_CONN(m)                                                   \
-    MYSQL *m = co_await usql::upool::GetInstance().Acquire();              \
+    MYSQL *m = co_await m_pool.Acquire();                                  \
     if (m == nullptr)                                                      \
     {                                                                      \
         LOGERR("user dao: mysql acquire failed");                          \
-        co_return -2;                                                      \
+        co_return -2; /* 建连失败, 可重试. */                               \
     }                                                                      \
-    usql::UsqlGuard guard_##m(m)
+    usql::UsqlGuard guard_##m(m_pool, m)
 
-uco::task<int> UserDao::InsertUser(uint64_t vid,
-                                   const std::string &username,
-                                   const std::string &password_hash)
+uco::task<int> MySqlUserDao::InsertUser(const user::InsertUserReq &req,
+                                        user::InsertUserRsp &rsp)
 {
+    (void)rsp; // 暂无数据返回 (预留: insert_id 等).
+
     USER_DAO_CONN(m); // RAII 归还连接.
 
     // 字符串一律 uescape (防注入); vid 为整数, 直接拼接无风险.
     std::string sql;
-    sql.reserve(username.size() + password_hash.size() + 96);
+    sql.reserve(req.username().size() + req.password_hash().size() + 96);
     sql += "INSERT INTO `user` (vid, username, password) VALUES (";
-    sql += std::to_string(vid);
+    sql += std::to_string(req.vid());
     sql += ", '";
-    sql += usql::uescape(m, username);
+    sql += usql::uescape(m, req.username());
     sql += "', '";
-    sql += usql::uescape(m, password_hash);
+    sql += usql::uescape(m, req.password_hash());
     sql += "')";
 
     usql::InsertResult r = co_await usql::uinsert(m, std::move(sql));
-    if (r.ok)
+    if (r.ret_code == 0)
     {
         co_return 0;
     }
-    if (r.err_no == usql::kDuplicateEntry)
+    if (r.ret_code == usql::kDuplicateEntry)
     {
         // 用户名唯一键冲突 (并发注册同名用户的最终防线).
         co_return 1;
     }
-    LOGERR("user dao: insert failed:", r.err_no, r.err_msg); // 详情进日志.
+    LOGERR("user dao: insert failed:", r.ret_code, r.err_msg); // 详情进日志.
     co_return r.Retryable() ? -2 : -1;
 }
 
-uco::task<int> UserDao::UpdatePassword(uint64_t vid,
-                                       const std::string &password_hash)
+uco::task<int> MySqlUserDao::UpdatePassword(const user::UpdatePasswordReq &req,
+                                            user::UpdatePasswordRsp &rsp)
 {
+    (void)rsp; // 暂无数据返回.
+
     USER_DAO_CONN(m);
 
     std::string sql;
-    sql.reserve(password_hash.size() + 80);
+    sql.reserve(req.password_hash().size() + 80);
     sql += "UPDATE `user` SET password = '";
-    sql += usql::uescape(m, password_hash);
+    sql += usql::uescape(m, req.password_hash());
     sql += "' WHERE vid = ";
-    sql += std::to_string(vid);
+    sql += std::to_string(req.vid());
 
     usql::AffectedResult r = co_await usql::uupdate(m, std::move(sql));
-    if (!r.ok)
+    if (r.ret_code != 0)
     {
-        LOGERR("user dao: update failed:", r.err_no, r.err_msg); // 详情进日志.
+        LOGERR("user dao: update failed:", r.ret_code, r.err_msg); // 详情进日志.
         co_return r.Retryable() ? -2 : -1;
     }
     if (r.affected_rows == 0)
@@ -97,22 +98,24 @@ uco::task<int> UserDao::UpdatePassword(uint64_t vid,
     co_return 0;
 }
 
-uco::task<int> UserDao::QueryByUsername(const std::string &username, User &out)
+uco::task<int> MySqlUserDao::QueryByUsername(
+    const user::QueryByUsernameReq &req, user::QueryByUsernameRsp &rsp)
 {
     USER_DAO_CONN(m);
 
-    // 列名须与 pb User 字段同名同型 (vid/username/password), 由
-    // uselect 内部 check_alignment 严格校验.
+    // 认证凭据查询: 列名须与 Rsp 字段同名同型 (别名 password_hash),
+    // 由 uselect 内部 check_alignment 严格校验.
     std::string sql;
-    sql.reserve(username.size() + 80);
-    sql += "SELECT vid, username, password FROM `user` WHERE username = '";
-    sql += usql::uescape(m, username);
+    sql.reserve(req.username().size() + 96);
+    sql += "SELECT vid, username, password AS password_hash FROM `user`"
+           " WHERE username = '";
+    sql += usql::uescape(m, req.username());
     sql += "'";
 
-    usql::SelectResult r = co_await usql::uselect(m, std::move(sql), &out);
-    if (!r.ok)
+    usql::SelectResult r = co_await usql::uselect(m, std::move(sql), &rsp);
+    if (r.ret_code != 0)
     {
-        LOGERR("user dao: select failed:", r.err_no, r.err_msg); // 详情进日志.
+        LOGERR("user dao: select failed:", r.ret_code, r.err_msg); // 详情进日志.
         co_return r.Retryable() ? -2 : -1;
     }
     if (r.num_rows == 0)
@@ -123,19 +126,21 @@ uco::task<int> UserDao::QueryByUsername(const std::string &username, User &out)
     co_return 0;
 }
 
-uco::task<int> UserDao::QueryByVid(uint64_t vid, User &out)
+uco::task<int> MySqlUserDao::QueryByVid(const user::QueryByVidReq &req,
+                                        user::QueryByVidRsp &rsp)
 {
     USER_DAO_CONN(m);
 
+    // 业务查询: 不 SELECT 密文, 密文不出 dao.
     std::string sql;
-    sql.reserve(96);
-    sql += "SELECT vid, username, password FROM `user` WHERE vid = ";
-    sql += std::to_string(vid);
+    sql.reserve(80);
+    sql += "SELECT vid, username FROM `user` WHERE vid = ";
+    sql += std::to_string(req.vid());
 
-    usql::SelectResult r = co_await usql::uselect(m, std::move(sql), &out);
-    if (!r.ok)
+    usql::SelectResult r = co_await usql::uselect(m, std::move(sql), &rsp);
+    if (r.ret_code != 0)
     {
-        LOGERR("user dao: select failed:", r.err_no, r.err_msg); // 详情进日志.
+        LOGERR("user dao: select failed:", r.ret_code, r.err_msg); // 详情进日志.
         co_return r.Retryable() ? -2 : -1;
     }
     if (r.num_rows == 0)

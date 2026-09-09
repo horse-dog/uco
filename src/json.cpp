@@ -7,7 +7,12 @@
 bool MessageToJson(const google::protobuf::Message &message, std::string &json)
 {
     using namespace google::protobuf::util;
-    auto ret = MessageToJsonString(message, &json);
+    // 保留 proto 原字段名 (snake_case 直出), 与 proto 定义一致,
+    // 免前端按字段名直觉取值时踩 camelCase 转换的坑;
+    // 解析端 JsonStringToMessage 本就同时接受两种命名, 不受影响.
+    JsonPrintOptions opts;
+    opts.preserve_proto_field_names = true;
+    auto ret = MessageToJsonString(message, &json, opts);
     if (!ret.ok())
     {
         LOGERR("message -> json failed, reason: %s, message: %s",

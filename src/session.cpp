@@ -288,19 +288,10 @@ static bool ParseSessionJson(const std::string &in,
 
 // ==================== SessionStore ====================
 
-SessionStore &SessionStore::GetInstance()
-{
-    static SessionStore ins;
-    return ins;
-}
-
-void SessionStore::Init(const Config &cfg)
+SessionStore::SessionStore(const Config &cfg, uredis::upool &pool)
+    : m_pool(pool)
 {
     m_cfg = cfg;
-    if (m_cfg.cookie_name.empty())
-    {
-        m_cfg.cookie_name = "uco_session";
-    }
     if (m_cfg.key_prefix.empty())
     {
         m_cfg.key_prefix = "uco:sess:";
@@ -332,23 +323,25 @@ void SessionStore::Init(const Config &cfg)
     }
 }
 
+SessionStore::~SessionStore() = default; // 请求全部结束后才析构, 注册表应已清空.
+
 // ---- Redis I/O ----
 
 uco::task<SessionStore::LoadResult> SessionStore::LoadValues(const std::string &id,
                                                              std::string &out)
 {
     uredis::uconnection *conn =
-        co_await uredis::upool::GetInstance().Acquire();
+        co_await m_pool.Acquire();
     if (conn == nullptr)
     {
         LOGERR("session: redis acquire failed");
         co_return LoadResult::kError;
     }
-    uredis::UredisGuard guard(conn); // RAII 归还连接.
+    uredis::UredisGuard guard(m_pool, conn); // RAII 归还连接.
 
     uredis::Reply r =
         co_await uredis::uget(conn, m_cfg.key_prefix + id, m_cfg.ts);
-    if (!r.ok)
+    if (r.ret_code != 0)
     {
         LOGERR("session: redis get failed:", r.err_msg);
         co_return LoadResult::kError;
@@ -371,13 +364,13 @@ uco::task<bool> SessionStore::SaveValues(const std::string &id,
     }
 
     uredis::uconnection *conn =
-        co_await uredis::upool::GetInstance().Acquire();
+        co_await m_pool.Acquire();
     if (conn == nullptr)
     {
         LOGERR("session: redis acquire failed");
         co_return false;
     }
-    uredis::UredisGuard guard(conn);
+    uredis::UredisGuard guard(m_pool, conn);
 
     // SET key json EX ttl: 数据与 TTL 整体重写 (改过期时间即改完重存).
     std::vector<std::string> args;
@@ -390,7 +383,7 @@ uco::task<bool> SessionStore::SaveValues(const std::string &id,
 
     uredis::Reply r =
         co_await uredis::ucommand(conn, std::move(args), m_cfg.ts);
-    if (!r.ok || r.type != uredis::Reply::STATUS || r.str != "OK")
+    if (r.ret_code != 0 || r.type != uredis::Reply::STATUS || r.str != "OK")
     {
         LOGERR("session: redis set failed:", r.err_msg);
         co_return false;
@@ -401,18 +394,18 @@ uco::task<bool> SessionStore::SaveValues(const std::string &id,
 uco::task<bool> SessionStore::RemoveKey(const std::string &id)
 {
     uredis::uconnection *conn =
-        co_await uredis::upool::GetInstance().Acquire();
+        co_await m_pool.Acquire();
     if (conn == nullptr)
     {
         LOGERR("session: redis acquire failed");
         co_return false;
     }
-    uredis::UredisGuard guard(conn);
+    uredis::UredisGuard guard(m_pool, conn);
 
     std::vector<std::string> keys;
     keys.emplace_back(m_cfg.key_prefix + id);
     uredis::Reply r = co_await uredis::udel(conn, std::move(keys), m_cfg.ts);
-    if (!r.ok)
+    if (r.ret_code != 0)
     {
         LOGERR("session: redis del failed:", r.err_msg);
         co_return false;
@@ -428,17 +421,17 @@ uco::task<bool> SessionStore::TouchTTL(const std::string &id, int ttl)
     }
 
     uredis::uconnection *conn =
-        co_await uredis::upool::GetInstance().Acquire();
+        co_await m_pool.Acquire();
     if (conn == nullptr)
     {
         LOGERR("session: redis acquire failed");
         co_return false;
     }
-    uredis::UredisGuard guard(conn);
+    uredis::UredisGuard guard(m_pool, conn);
 
     uredis::Reply r =
         co_await uredis::uexpire(conn, m_cfg.key_prefix + id, ttl, m_cfg.ts);
-    if (!r.ok)
+    if (r.ret_code != 0)
     {
         LOGERR("session: redis expire failed:", r.err_msg);
         co_return false;
@@ -513,38 +506,12 @@ bool SessionStore::ParseSignedCookie(const std::string &cookie, std::string &id)
     {
         return false;
     }
-    // 恒时比较, 防时序侧信道.
+    // 恒时比较, 防时序侧信道:
+    // memcmp/== 在首个不匹配字节即返回, 耗时取决于匹配前缀长度,
+    // 攻击者可反复伪造签名并测量响应耗时, 逐字节逼近正确签名
+    // (timing attack); CRYPTO_memcmp (OpenSSL) 无论差异在哪都扫完
+    // 全部字节, 耗时与内容无关. 对cookie/HMAC 等密文比较是标准做法.
     return CRYPTO_memcmp(got.data(), expect.data(), got.size()) == 0;
-}
-
-// ---- 请求注册表 ----
-
-void SessionStore::Register(HttpContext *ctx, Session *s)
-{
-    std::lock_guard<std::mutex> guard(m_mtxRegistry); // 临界区内无 co_await.
-    auto [it, inserted] = m_mapRegistry.emplace(ctx, s);
-    if (!inserted)
-    {
-        LOGWRN("session: duplicate SessionMiddleware on same request");
-        it->second = s;
-    }
-}
-
-void SessionStore::Unregister(HttpContext *ctx, Session *s)
-{
-    std::lock_guard<std::mutex> guard(m_mtxRegistry);
-    auto it = m_mapRegistry.find(ctx);
-    if (it != m_mapRegistry.end() && it->second == s)
-    {
-        m_mapRegistry.erase(it);
-    }
-}
-
-Session *SessionStore::Find(HttpContext *ctx)
-{
-    std::lock_guard<std::mutex> guard(m_mtxRegistry);
-    auto it = m_mapRegistry.find(ctx);
-    return it == m_mapRegistry.end() ? nullptr : it->second;
 }
 
 // ==================== Session ====================
@@ -552,13 +519,27 @@ Session *SessionStore::Find(HttpContext *ctx)
 Session *Session::FromContext(HttpContext *ctx)
 {
     if (ctx == nullptr)
-    {
-        return nullptr;
+    { // handler 链内的 ctx 恒非空, 传空属调用方编程错误:
+        // fail-fast (FTL 终止进程), 不以 500 容错掩盖 bug.
+        LOGFTL("session: FromContext called with null ctx");
     }
-    return SessionStore::GetInstance().Find(ctx);
+    Session *s = static_cast<Session *>(ctx->Get(kSessionKey));
+    if (s == nullptr)
+    { // handler 能执行到这里说明链存在, 但 session 从未注册
+        // → 中间件不在链上 (路由忘挂 MakeSessionMiddleware), 部署错误:
+        // 显式失败并留 ERR 日志, 勿静默走"未登录"分支 (≈ gin 的 MustGet).
+        LOGERR("session: middleware missing, "
+               "route should mount MakeSessionMiddleware");
+        throw HttpException(500, "session middleware missing");
+    }
+    return s;
 }
 
-Session::Session(HttpContext *ctx) : m_ptrCtx(ctx) {}
+Session::Session(SessionStore *store, const std::string &name,
+                 HttpContext *ctx)
+    : m_ptrStore(store), m_sName(name), m_ptrCtx(ctx)
+{
+}
 
 // ---- 内存操作 ----
 
@@ -668,11 +649,11 @@ void Session::Destroy()
 
 uco::task<void> Session::InitLoad()
 {
-    SessionStore &store = SessionStore::GetInstance();
+    SessionStore &store = *m_ptrStore;
     const SessionStore::Config &cfg = store.m_cfg;
 
     // 1. cookie 解析 + 验签 (无 cookie / 验签失败 -> 全新会话).
-    const std::string cookie = m_ptrCtx->GetCookie(cfg.cookie_name);
+    const std::string cookie = m_ptrCtx->GetCookie(m_sName);
     if (cookie.empty())
     {
         co_return;
@@ -721,7 +702,7 @@ uco::task<void> Session::InitLoad()
 
 int Session::EffectiveMaxAge() const
 {
-    const SessionStore::Config &cfg = SessionStore::GetInstance().m_cfg;
+    const SessionStore::Config &cfg = m_ptrStore->m_cfg;
     return m_iMaxAgeOverride >= 0 ? m_iMaxAgeOverride : cfg.max_age;
 }
 
@@ -733,7 +714,7 @@ uco::task<bool> Session::Save()
         co_return true;
     }
 
-    SessionStore &store = SessionStore::GetInstance();
+    SessionStore &store = *m_ptrStore;
 
     // 1. 老会话但先前加载失败 (Redis 故障): 拒绝覆盖,
     //    防止抖动期间误清/误覆盖用户会话.
@@ -788,43 +769,43 @@ uco::task<bool> Session::Save()
 
 void Session::WriteCookie(int max_age)
 {
-    SessionStore &store = SessionStore::GetInstance();
+    SessionStore &store = *m_ptrStore;
     const SessionStore::Config &cfg = store.m_cfg;
 
     // cookie 值 = "id.sig": 只存 ID 与签名, 数据本体在 Redis.
     // SameSite=Lax 为 CSRF 缓解默认 (gin 同款机制: SetSameSite 作用于 SetCookie).
     m_ptrCtx->SetSameSite(HttpContext::eSameSiteLax);
-    m_ptrCtx->SetCookie(cfg.cookie_name, m_sID + "." + store.SignID(m_sID),
+    m_ptrCtx->SetCookie(m_sName, m_sID + "." + store.SignID(m_sID),
                         max_age, cfg.path, cfg.domain, cfg.secure,
                         cfg.http_only);
 }
 
 void Session::ExpireCookie()
 {
-    SessionStore &store = SessionStore::GetInstance();
+    SessionStore &store = *m_ptrStore;
     const SessionStore::Config &cfg = store.m_cfg;
 
     // 删除 cookie (gin 同款写法: 空值 + 负 MaxAge -> "Max-Age=0").
     m_ptrCtx->SetSameSite(HttpContext::eSameSiteLax);
-    m_ptrCtx->SetCookie(cfg.cookie_name, "", -1, cfg.path, cfg.domain,
+    m_ptrCtx->SetCookie(m_sName, "", -1, cfg.path, cfg.domain,
                         cfg.secure, cfg.http_only);
 }
 
 // ==================== 中间件 ====================
 
-uco::task<void> SessionMiddleware(HttpContext *ctx)
+uco::task<void> SessionStore::MiddlewareImpl(SessionStore *store,
+                                              const std::string &name,
+                                              HttpContext *ctx)
 {
-    SessionStore &store = SessionStore::GetInstance();
-
     // 1. 创建并加载会话 (cookie 验签 + Redis 读取).
     //    与 gin 的惰性加载不同: 请求进入即加载, 换取 Get() 同步语义.
     // make_unique 无法访问私有构造 (它不是友元), 友元内直接 new.
-    std::unique_ptr<Session> session(new Session(ctx));
+    std::unique_ptr<Session> session(new Session(store, name, ctx));
     co_await session->InitLoad();
 
-    // 2. 注册 (≈ gin 的 c.Set(DefaultKey, s)),
+    // 2. 挂到请求上下文 (≈ gin 的 c.Set(DefaultKey, s)),
     //    handler 经 Session::FromContext(ctx) 取同一指针.
-    store.Register(ctx, session.get());
+    ctx->Set(kSessionKey, session.get());
 
     try
     {
@@ -832,16 +813,16 @@ uco::task<void> SessionMiddleware(HttpContext *ctx)
     }
     catch (...)
     {
-        // Abort()/handler 异常路径: 清理注册表后原样上抛
-        // (由 HttpConnection::Process 统一兜底), 防 Session 泄漏/悬垂.
+        // Abort()/handler 异常路径: 摘除指针后原样上抛
+        // (由 HttpConnection::Process 统一兜底), 防 Session 悬垂.
         // 注意: 异常路径不补存会话 (Abort 语义 = 中止).
-        store.Unregister(ctx, session.get());
+        ctx->Set(kSessionKey, nullptr);
         throw;
     }
 
     // 3. 链正常结束: 补存忘保存的脏数据 (C++ 场景默认兜底,
     //    gin 要求手动 Save; 可经 Config::auto_save 关闭以对齐 gin).
-    if (store.m_cfg.auto_save && session->m_bWritten)
+    if (store->m_cfg.auto_save && session->m_bWritten)
     {
         if (!co_await session->Save())
         {
@@ -849,7 +830,18 @@ uco::task<void> SessionMiddleware(HttpContext *ctx)
         }
     }
 
-    // 4. 注销; unique_ptr 析构, Session 指针自此失效.
-    store.Unregister(ctx, session.get());
+    // 4. 摘除; unique_ptr 析构, Session 指针自此失效.
+    ctx->Set(kSessionKey, nullptr);
     co_return;
+}
+
+HttpServer::HandleFunc Sessions(SessionStore *store, const std::string &name)
+{
+    // ≈ gin 的 sessions.Sessions(name, store): 闭包捕获 store 与 name
+    // (gin: session.name). 闭包随 HandleFunc 拷入路由树; 含 string 超出
+    // std::function 的 SBO, 每请求路由匹配拷贝时一次堆分配,
+    // 相比请求本身的解析开销可忽略.
+    return [store, name](HttpContext *ctx) -> uco::task<void> {
+        return SessionStore::MiddlewareImpl(store, name, ctx);
+    };
 }

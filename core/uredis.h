@@ -6,7 +6,7 @@
  *
  * @note 直接实现 RESP2 协议, 不依赖 hiredis;
  *       所有接口默认超时 10s, ts = {0, 0} 表示不超时 (慎用);
- *       超时时结果中 ok = false 且 timeout = true;
+ *       超时时结果中 ret_code = UredisError::kTimeout;
  *       命令以参数数组下发, 天然免疫注入, 无需转义;
  *       传输层错误或超时后连接标记为 broken, 不可再复用;
  *       host 仅支持点分 IPv4, 域名请自行解析后传入.
@@ -29,20 +29,14 @@
 namespace uredis
 {
 
-/// 连接句柄 (实现细节隐藏在 uredis.cpp).
+/// Redis 连接句柄.
 struct uconnection;
 
-/// uredis 错误码 (RedisError::err_no 取值地图):
-///   负值 = 系统错误:
-///     -200/-201 = 框架自身 (参数非法/超时);
-///     -1 ~ -133 = 传输层 errno 取负 (ECONNRESET 等, 常见者已具名);
-///     -300      = Redis 服务端错误回复 (RESP 无数字码, 见 err_msg);
-///   正值预留给上层业务逻辑码.
 enum UredisError
 {
     // ---- 框架自身 ----
     kBadArgument = -200, ///< 参数非法 (空参数/连接无效).
-    kTimeout     = -201, ///< 应用层超时 (timeout 字段同时置位;
+    kTimeout     = -201, ///< 应用层超时 (deadline 到期;
                          ///<  区别于内核 TCP 超时 kTcpTimedout).
 
     // ---- 传输层 errno 取负 (常见者具名, 值为 -errno) ----
@@ -62,10 +56,7 @@ enum UredisError
 /// 操作错误信息.
 struct RedisError
 {
-    bool ok = true;        ///< 是否成功.
-    bool timeout = false;  ///< 是否超时失败.
-    int err_no = 0;        ///< 0 成功; 负值 = 系统错误 (见 UredisError 枚举);
-                           ///< 正值预留给上层业务逻辑码.
+    int ret_code = 0;      ///< 0 成功; !0 失败.
     std::string err_msg;   ///< 错误描述.
 
     /**
@@ -162,10 +153,8 @@ class upool
         uco_time_t ts = {10, 0};        ///< 建连超时.
     };
 
-    static upool &GetInstance();
-
-    void Init(const config &cfg);
-
+    upool(const config &cfg);
+   ~upool();
     upool(const upool &) = delete;
     upool &operator=(const upool &) = delete;
     upool(upool &&) = delete;
@@ -185,8 +174,8 @@ class upool
     void Close();
 
   private:
-     upool();
-    ~upool();
+    /// 初始化状态并启动 reaper. 仅由构造函数调用, 不可重复执行.
+    void Init(const config &cfg);
 
     /// 内部状态: shared_ptr 共享所有权 (reaper 协程与进行中的 acquire 各持
     /// 一份), 保证池析构后协程仍能安全访问状态并自行退出.
@@ -313,9 +302,10 @@ class ulock
 class UredisGuard
 {
 public:
-    UredisGuard(uconnection *conn) : conn_(conn) {}
-    ~UredisGuard() { upool::GetInstance().Release(conn_); }
+    UredisGuard(upool &pool, uconnection *conn) : pool_(pool), conn_(conn) {}
+    ~UredisGuard() { pool_.Release(conn_); }
 private:
+    upool &pool_;
     uconnection *conn_ = 0;
 };
 

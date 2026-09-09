@@ -13,7 +13,7 @@ using namespace std::chrono_literals;
 task<void> demo1(uredis::upool &pool)
 {
     auto *c = co_await pool.Acquire();
-    uredis::UredisGuard guard(c);
+    uredis::UredisGuard guard(pool, c);
     if (c == nullptr)
     {
         LOGERR("acquire failed");
@@ -21,10 +21,10 @@ task<void> demo1(uredis::upool &pool)
     }
 
     auto pong = co_await uredis::uping(c);
-    LOGMSG("ping:", pong.str, "ok:", NR(pong.ok));
+    LOGMSG("ping:", pong.str, "ret_code:", pong.ret_code);
 
     auto sr = co_await uredis::uset(c, "uco:test:str", "hello");
-    LOGMSG("set:", sr.str, "ok:", NR(sr.ok));
+    LOGMSG("set:", sr.str, "ret_code:", sr.ret_code);
 
     auto gr = co_await uredis::uget(c, "uco:test:str");
     LOGMSG("get:", gr.str, "type:", (int)gr.type);
@@ -48,7 +48,7 @@ task<void> demo1(uredis::upool &pool)
 task<void> demo2(uredis::upool &pool)
 {
     auto *c = co_await pool.Acquire();
-    uredis::UredisGuard guard(c);
+    uredis::UredisGuard guard(pool, c);
     if (c == nullptr)
     {
         LOGERR("acquire failed");
@@ -79,7 +79,7 @@ task<void> demo2(uredis::upool &pool)
 
     // 服务端错误回复: 对 string key 执行 LPUSH -> WRONGTYPE.
     auto er = co_await uredis::ucommand(c, {"LPUSH", "uco:test:str", "x"});
-    LOGMSG("error reply:", er.err_msg, "ok:", NR(er.ok));
+    LOGMSG("error reply:", er.err_msg, "ret_code:", er.ret_code);
 
     auto dr = co_await uredis::udel(c, {"uco:test:cnt", "uco:test:list",
                                         "uco:test:str", "uco:test:bin",
@@ -160,8 +160,7 @@ task<void> demo()
     cfg.max_size = 4;
     cfg.min_idle = 1;
     cfg.reap_interval_ms = 2'000;
-    auto&& pool = uredis::upool::GetInstance();
-    pool.Init(cfg);
+    uredis::upool pool(cfg);
 
     cobatch batchrunner(5);
     batchrunner.add(demo1(pool));

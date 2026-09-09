@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+// 演示/测试用消息 (HTML 模板页等), 后续将删除.
+
+message Address {
+  string street = 1;
+  string city = 2;
+}
+
+message JokeTemplate {
+  string name = 1;
+  int32 age = 2;
+  repeated Address addresses = 3;
+}

@@ -460,18 +460,20 @@ private:
     i64 timer_armed_deadline = 0;         ///< 当前超时请求对应的到期时刻
     u64 timer_armed_user_data = 0;        ///< 当前超时请求的 user_data (取消时定位用)
     bool timer_arm_pending = false;       ///< 提交队列满导致的待重试标记
+    int scheduler_state = 0;              ///< 0=未开跑 1=运行中 2=已退出 (此后 go abort)
 
   private:
     thread_co_env();
     ~thread_co_env();
 };
 
+extern void __go_dispatch(void *handle);
+
 struct __go__
 {
     template <class _Tp> inline void operator-(uco::task<_Tp> &&task)
     {
-        FRAMEWORK_DBG("go coroutine:", task.m_handle.address());
-        task.m_handle.resume();
+        __go_dispatch(task.m_handle.address());
         task.m_handle = nullptr;
     }
 };

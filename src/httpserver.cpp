@@ -17,8 +17,6 @@
 #include "uco.h"
 #include "uio.h"
 #include "ulog.h"
-#include "uredis.h"
-#include "usql.h"
 #include "string_utils.h"
 #include "url.h"
 
@@ -299,9 +297,10 @@ std::string HttpContext::GetCookie(const std::string& name) const
     return url_decode(value, false);
 }
 
-// path 空则默认 "/"; value 走 URL 转义 (QueryEscape);
-// MaxAge 三态 (>0 存活秒数 / <0 删除 / =0 会话 cookie, 无 Max-Age 属性);
-// SameSite 取 Context 级 SetSameSite 的暂存值.
+// 对齐 gin 的 SetCookie 实现:
+//   gin: path 空则默认 "/"; value 走 URL 转义 (QueryEscape);
+//        MaxAge 三态 (>0 存活秒数 / <0 删除 / =0 会话 cookie, 无 Max-Age 属性);
+//        SameSite 取 Context 级 SetSameSite 的暂存值.
 // 属性输出顺序同 Go net/http writeSetCookie.
 // value 的转义与 GetCookie 的反转义构成闭环 (gin: QueryEscape/QueryUnescape).
 void HttpContext::SetCookie(const std::string &name, const std::string &value,
@@ -512,6 +511,17 @@ uco::task<void> HttpContext::Next()
     co_return;
 }
 
+void HttpContext::Set(const std::string &key, void *value)
+{
+    m_mapUserData[key] = value;
+}
+
+void *HttpContext::Get(const std::string &key) const
+{
+    auto it = m_mapUserData.find(key);
+    return it == m_mapUserData.end() ? nullptr : it->second;
+}
+
 void HttpContext::Abort(int httpRetCode, const std::string &msg)
 {
     throw HttpException(httpRetCode, msg);
@@ -629,21 +639,19 @@ std::string HttpServer::HttpServerInstance::GetErrorTemplatePath() const
 }
 
 std::string
-HttpServer::HttpServerInstance::GetForward(const std::string &path) const
+HttpServer::HttpServerInstance::GetForward(HttpMethod method,
+                                            const std::string &path) const
 {
     if (m_manager == nullptr)
     {
         return "";
     }
-    auto it = m_manager->m_fwdDict.find(path);
+    auto it = m_manager->m_fwdDict.find({method, path});
     if (it != m_manager->m_fwdDict.end())
     {
         return it->second;
     }
-    else
-    {
-        return "";
-    }
+    return "";
 }
 
 std::pair<std::vector<HttpServer::HandleFunc>,
@@ -752,28 +760,11 @@ void HttpServer::Init(int port, int num_threads, int keepalivecnt,
     setup_signalfd();
 }
 
-void HttpServer::InitMySqLPool()
+uco::task<int> HttpServer::Run()
 {
-    usql::upool::config config;
-    config.host = "127.0.0.1";
-    config.user = "root";
-    config.pass = "123456";
-    config.db = "webserver";
-    config.max_size = 16;
-    usql::upool::GetInstance().Init(config);
-}
-void HttpServer::InitRedisPool()
-{
-    uredis::upool::config config;
-    config.max_size = 16;
-    uredis::upool::GetInstance().Init(config);
-}
-
-void HttpServer::Run()
-{
-    InitMySqLPool();
-    InitRedisPool();
-
+    // 连接池由使用方 (如 main 的 RunHttpServer) 初始化与关闭,
+    // 此处不再重复 Init: 重复 Init 会泄漏旧 reaper 协程,
+    // 其定时器常驻调度器导致进程退出时挂死.
     for (int i = 1; i < m_iNumThreads; i++)
     {
         m_vecThreads.emplace_back(
@@ -789,12 +780,15 @@ void HttpServer::Run()
 
     m_vecWorkers[0].Init(this, m_iPort);
     m_vecWorkers[0].Run();
-    go peek_exit();
+    co_await peek_exit();
+    co_return 0;
 }
 
-void HttpServer::Forward(const std::string &src, const std::string &dst)
+void HttpServer::Forward(HttpMethod method, const std::string &src,
+                          const std::string &dst)
 {
-    m_fwdDict.emplace(src, dst);
+    // 覆盖语义: 同一 (method, src) 重复注册时后者生效.
+    m_fwdDict[{method, src}] = dst;
 }
 
 static uco::task<void> default_handle(HttpContext *context)
@@ -882,9 +876,6 @@ uco::task<void> HttpServer::peek_exit()
         }
         LOGDBG("xread ret %zd", s);
     }
-
-    usql::upool::GetInstance().Close();
-    uredis::upool::GetInstance().Close();
     co_return;
 }
 

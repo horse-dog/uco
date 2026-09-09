@@ -142,6 +142,23 @@ void suspend_always::await_suspend(std::coroutine_handle<> h) noexcept
     YIELD_LIST->push(&(ch.promise()));
 }
 
+void __go_dispatch(void *handle)
+{
+    auto ch = uco::task<void>::coro_handle::from_address(handle);
+    if (UCOENV.scheduler_state == 1) [[likely]]
+    {
+        ch.resume();
+    }
+    else if (UCOENV.scheduler_state == 0)
+    {
+        YIELD_LIST->push(&(ch.promise()));
+    }
+    else
+    { // 调度器已退出 (静态析构期等): 协程挂进去也无人放行, 直接终止.
+        SYSFTL("go after scheduler exited");
+    }
+}
+
 #define FLAG_ACQUIRE_SQE_FAILED 1
 
 struct io_uring_sqe *thread_co_env::get_sqe() noexcept
@@ -276,6 +293,8 @@ thread_co_env::~thread_co_env()
 void thread_co_env::schedule()
 {
     FRAMEWORK_DBG("shceduler start");
+    scheduler_state = 1;
+
     int retry_register_read_syncfd = 0;
     auto yield_co_list = (uco_linked_list *)yield_list;
     auto sqe_co_list = (uco_linked_list *)wait_sqe_list;
@@ -294,6 +313,7 @@ void thread_co_env::schedule()
             else
             {
                 FRAMEWORK_DBG("shceduler exit");
+                scheduler_state = 2;
                 break;
             }
         }

@@ -169,21 +169,20 @@ a:hover, a:active, a:focus {
 }
 
 .spinner {
-  border: 1px solid transparent;
-  border-radius: 5px;
   position: relative;
+  width: 65px;
+  height: 65px;
 }
 
 .spinner:before {
   content: '';
   box-sizing: border-box;
   position: absolute;
-  top: 50%;
-  left: 50%;
+  top: 0;
+  left: 0;
   width: 65px;
   height: 65px;
-  margin-top: -10px;
-  margin-left: -10px;
+  margin: 0;
   border-radius: 50%;
   border: 1px solid #000000;
   border-top-color: #f9f9f9;
@@ -285,6 +284,95 @@ a:hover, a:active, a:focus {
 }
 
 
+
+/*---------------------------------------
+  Auth form and toast
+-----------------------------------------*/
+
+#welcome-username {
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+}
+
+.auth-form input {
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 5px;
+  outline: none;
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.05);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.auth-form input:focus {
+  border-color: #337ab7;
+  box-shadow: 0 0 0 1px rgba(51, 122, 183, 0.35),
+              0 2px 7px rgba(0, 0, 0, 0.05);
+}
+
+.auth-form input.is-invalid,
+.auth-form input.is-invalid:focus {
+  border-color: #ff4747;
+  box-shadow: 0 0 0 1px rgba(255, 71, 71, 0.35),
+              0 2px 7px rgba(0, 0, 0, 0.05);
+}
+
+.auth-toast {
+  position: fixed;
+  top: 96px;
+  left: 50%;
+  z-index: 100000;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: 8px 14px;
+  color: #eeeeef;
+  background: rgba(38, 39, 42, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 18px;
+  letter-spacing: 0.1px;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translate(-50%, -8px);
+  transition: opacity 0.28s ease, transform 0.28s ease, visibility 0.28s;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.auth-toast > span {
+  color: inherit;
+}
+
+.auth-toast.is-visible {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+
+.auth-toast.is-leaving {
+  opacity: 0;
+  visibility: visible;
+  transform: translate(-50%, -6px);
+  transition-duration: 0.65s;
+}
+
+@media (max-width: 580px) {
+  .auth-toast {
+    top: 80px;
+    padding: 8px 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-toast,
+  .auth-toast.is-leaving {
+    transition-duration: 0.01ms;
+  }
+}
 
 /*---------------------------------------
   Home section              

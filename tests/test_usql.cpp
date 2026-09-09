@@ -9,17 +9,17 @@ using namespace uco;
 task<void> demo1(usql::upool& pool)
 {
     MYSQL *m = co_await pool.Acquire();
-    usql::UsqlGuard guard(m);
+    usql::UsqlGuard guard(pool, m);
     if (m == nullptr)
     {
         LOGERR("acquire failed");
         co_return;
     }
 
-    UserList users;
+    webserver::user::UserList users;
 
     auto ret = co_await usql::uselect(m, "SELECT * FROM user", users.mutable_userlist());
-    if (!ret.ok)
+    if (ret.ret_code != 0)
     {
         LOGERR("uselect error:", ret.err_msg);
         co_return;
@@ -30,17 +30,17 @@ task<void> demo1(usql::upool& pool)
 task<void> demo2(usql::upool& pool)
 {
     MYSQL *m = co_await pool.Acquire();
-    usql::UsqlGuard guard(m);
+    usql::UsqlGuard guard(pool, m);
     if (m == nullptr)
     {
         LOGERR("acquire failed");
         co_return;
     }
 
-    User user;
+    webserver::user::User user;
 
     auto ret = co_await usql::uselect(m, "SELECT * FROM `user` WHERE username = 'root'", &user);
-    if (!ret.ok)
+    if (ret.ret_code != 0)
     {
         LOGERR("uselect error:", ret.err_msg);
         co_return;
@@ -56,7 +56,7 @@ task<void> demo2(usql::upool& pool)
 task<void> demo3(usql::upool& pool)
 {
     MYSQL *m = co_await pool.Acquire();
-    usql::UsqlGuard guard(m);
+    usql::UsqlGuard guard(pool, m);
     if (m == nullptr)
     {
         LOGERR("acquire failed");
@@ -84,8 +84,7 @@ task<void> demo()
     cfg.max_size = 4;
     cfg.reap_interval_ms = 2'000;
     cfg.min_idle = 1;
-    auto&& pool = usql::upool::GetInstance();
-    pool.Init(cfg);
+    auto&& pool = usql::upool(cfg);
 
     cobatch batchrunner(5);
     batchrunner.add(demo1(pool));

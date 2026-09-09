@@ -60,11 +60,9 @@ static int64_t elapsed_ms(const std::chrono::steady_clock::time_point &begin)
 static void fill_error(SqlError &e, MYSQL *mysql, int r, const char *op,
                        int64_t elapsed)
 {
-    e.ok = false;
     if (r == -ETIME)
     {
-        e.timeout = true;
-        e.err_no = kTimeout;
+        e.ret_code = kTimeout;
         e.err_msg = "usql: operation timeout";
         // 超时后流已失步 (服务端响应可能迟到, 错配下一条命令),
         // 连接不可复用; mysql_errno() 读的就是 net.last_errno, 直接
@@ -76,18 +74,18 @@ static void fill_error(SqlError &e, MYSQL *mysql, int r, const char *op,
         SYSWRN("usql:", op, "timeout, elapsed_ms:", elapsed);
         return;
     }
-    e.err_no = -(int)mysql_errno(mysql); // MySQL 原码取负 (见 UsqlError).
+    e.ret_code = -(int)mysql_errno(mysql); // MySQL 原码取负 (见 UsqlError).
     e.err_msg = mysql_error(mysql);
     e.sqlstate = mysql_sqlstate(mysql);
-    SYSERR("usql:", op, "failed, errno:", e.err_no, "msg:", e.err_msg,
+    SYSERR("usql:", op, "failed, errno:", e.ret_code, "msg:", e.err_msg,
            "sqlstate:", e.sqlstate, "elapsed_ms:", elapsed);
 }
 
 bool SqlError::Retryable() const
 {
-    return timeout || err_no == kTimeout ||
-           (err_no <= -2000 && err_no > -3000) || // MySQL 客户端连接类.
-           err_no == kLockDeadlock || err_no == kLockWaitTimeout;
+    return ret_code == kTimeout ||
+           (ret_code <= -2000 && ret_code > -3000) || // MySQL 客户端连接类.
+           ret_code == kLockDeadlock || ret_code == kLockWaitTimeout;
 }
 
 /// io_uring poll_add 监听 fd 事件.
@@ -333,6 +331,12 @@ void uclose(MYSQL *mysql)
 
 std::string uescape(MYSQL *mysql, const std::string &s)
 {
+    if (mysql == nullptr)
+    {
+        // 无法安全转义: 返回空串 (宁可数据被拒, 不可漏转义致注入).
+        SYSERR("usql: uescape: mysql is nullptr");
+        return {};
+    }
     std::string out(s.size() * 2 + 1, '\0');
     unsigned long n = mysql_real_escape_string(mysql, out.data(), s.c_str(),
                                                (unsigned long)s.size());
@@ -346,6 +350,12 @@ uco::task<InsertResult> uinsert(MYSQL *mysql, std::string sql,
                                  uco_time_t ts)
 {
     InsertResult result;
+    if (mysql == nullptr)
+    {
+        result.ret_code = kBadArgument;
+        result.err_msg = "usql: insert: mysql is nullptr";
+        co_return result;
+    }
     const auto begin = std::chrono::steady_clock::now();
     LOGMSG("usql: insert, fd:", get_mysql_fd(mysql));
     int r = co_await await_call(
@@ -374,6 +384,12 @@ uco::task<AffectedResult> uupdate(MYSQL *mysql, std::string sql,
                                   uco_time_t ts)
 {
     AffectedResult result;
+    if (mysql == nullptr)
+    {
+        result.ret_code = kBadArgument;
+        result.err_msg = "usql: update: mysql is nullptr";
+        co_return result;
+    }
     const auto begin = std::chrono::steady_clock::now();
     LOGMSG("usql: update, fd:", get_mysql_fd(mysql));
     int r = co_await await_call(
@@ -400,6 +416,12 @@ uco::task<AffectedResult> udelete(MYSQL *mysql, std::string sql,
                                   uco_time_t ts)
 {
     AffectedResult result;
+    if (mysql == nullptr)
+    {
+        result.ret_code = kBadArgument;
+        result.err_msg = "usql: delete: mysql is nullptr";
+        co_return result;
+    }
     const auto begin = std::chrono::steady_clock::now();
     LOGMSG("usql: delete, fd:", get_mysql_fd(mysql));
     int r = co_await await_call(
@@ -426,8 +448,14 @@ uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
                                 uco_time_t ts)
 {
     SelectResult ret;
+    if (mysql == nullptr)
+    {
+        ret.ret_code = kBadArgument;
+        ret.err_msg = "usql: select: mysql is nullptr";
+        co_return ret;
+    }
     const auto begin = std::chrono::steady_clock::now();
-    LOGMSG("usql: select, fd:", get_mysql_fd(mysql));
+    LOGDBG("usql: select, fd:", get_mysql_fd(mysql));
 
     // 1. 发送请求.
     int r = co_await await_call(
@@ -446,7 +474,7 @@ uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
 
     if (mysql_field_count(mysql) == 0)
     {
-        ret.ok = false;
+        ret.ret_code = kBadArgument;
         ret.err_msg = "usql: no result set (not a SELECT?)";
         SYSERR("usql: select no result set, fd:", get_mysql_fd(mysql));
         co_return ret;
@@ -673,13 +701,12 @@ uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
     if (out == nullptr)
     {
         SelectResult ret;
-        ret.ok = false;
-        ret.err_no = kBadArgument;
+        ret.ret_code = kBadArgument;
         ret.err_msg = "usql: uselect: out is nullptr";
         co_return ret;
     }
     SelectResult ret = co_await uselect(mysql, std::move(sql), ts);
-    if (!ret.ok)
+    if (ret.ret_code != 0)
     {
         co_return ret; // 执行失败, 原样带错误信息.
     }
@@ -687,8 +714,7 @@ uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
     if (!ret.check_alignment(out->GetDescriptor()))
     {
         // 对齐失败详情已由 check_alignment 记 SYSERR.
-        ret.ok = false;
-        ret.err_no = kBadArgument;
+        ret.ret_code = kBadArgument;
         ret.err_msg = "usql: uselect: columns not aligned with proto fields";
         co_return ret;
     }
@@ -699,8 +725,7 @@ uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
         if (!ret.bind_row(0, *out))
         {
             // 绑定失败详情已由 bind_row 记 SYSERR.
-            ret.ok = false;
-            ret.err_no = kBadArgument;
+            ret.ret_code = kBadArgument;
             ret.err_msg = "usql: uselect: bind row failed";
             co_return ret;
         }
@@ -759,6 +784,12 @@ uco::task<TxnResult> utransaction(MYSQL *mysql, std::vector<std::string> sqls,
                                     uco_time_t ts)
 {
     TxnResult txn;
+    if (mysql == nullptr)
+    {
+        txn.ret_code = kBadArgument;
+        txn.err_msg = "usql: transaction: mysql is nullptr";
+        co_return txn;
+    }
     const auto begin = std::chrono::steady_clock::now();
 
     LOGMSG("usql: txn begin, fd:", get_mysql_fd(mysql),
@@ -811,17 +842,12 @@ uco::task<TxnResult> utransaction(MYSQL *mysql, std::vector<std::string> sqls,
 
 // ==================== 连接池 ====================
 
-upool::upool()
+upool::upool(const config &cfg)
 {
+    Init(cfg);
 }
 
 upool::~upool() { Close(); }
-
-upool& upool::GetInstance()
-{
-    static upool instance;
-    return instance;
-}
 
 void upool::Init(const config &cfg)
 {

@@ -22,6 +22,7 @@ include_directories(
     ${GENERATED_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/webserver
 )
 
 add_library(ulog core/ulogshm.cpp core/ulog.cpp)
@@ -60,13 +61,20 @@ file(GLOB_RECURSE SRC_HTTP "src/*.cpp")
 file(GLOB_RECURSE SRC_WEBSERVER "webserver/*.cpp")
 
 add_executable(
-    server 
+    server
     ${PROTO_SRCS}
     ${PROTO_HDRS}
     ${SRC_HTTP}
     ${SRC_WEBSERVER}
 )
 target_link_libraries(server PRIVATE ulog uco uring)
+# ---- bcrypt (libxcrypt crypt_r, service 层密码校验) ----
+find_library(CRYPT_LIBRARY crypt)
+if(CRYPT_LIBRARY)
+  target_link_libraries(server PRIVATE ${CRYPT_LIBRARY})
+else()
+  message(FATAL_ERROR "libcrypt not found: service 层 bcrypt 依赖 libxcrypt")
+endif()
 if(USE_JEMALLOC)
     target_link_libraries(server PRIVATE jemalloc)
 endif()

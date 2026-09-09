@@ -7,7 +7,7 @@
  * @note MySQL 异步接口文档:
  *       https://dev.mysql.com/doc/c-api/8.4/en/c-api-asynchronous-interface-usage.html
  * @note 所有接口默认超时 10s, ts = {0, 0} 表示不超时 (慎用);
- *       超时时结果中 ok = false 且 timeout = true.
+ *       超时时结果中 ret_code = UsqlError::kTimeout.
  * @note 官方限制: 不支持 LOAD DATA / LOAD XML 与协议压缩;
  *       异步操作完成前 sql 内存不得释放.
  * @note 防 SQL 注入请使用 uescape().
@@ -34,18 +34,11 @@
 namespace usql
 {
 
-/// usql 错误码 (SqlError::err_no 取值地图):
-///   负值 = 系统错误 (err_no != 0 即出错):
-///     -200/-201 = usql 框架自身;
-///     其余负值 = MySQL 原生错误码取负 (值为 -原码, 服务端
-///     mysqld_error.h / 客户端 errmsg.h, 常用者已具名,
-///     未具名的取负后对照官方错误码表).
-///   正值预留给上层业务逻辑码 (usql 层不产生).
 enum UsqlError
 {
     // ---- usql 框架自身 ----
     kBadArgument = -200, ///< 参数非法/列与 proto 不对齐/绑定失败 (见 err_msg).
-    kTimeout     = -201, ///< 操作超时 (timeout 字段同时置位).
+    kTimeout     = -201, ///< 操作超时 (应用层 deadline 到期).
 
     // ---- MySQL 服务端 (mysqld_error.h, 值为原码取负) ----
     kAccessDenied        = -1045, ///< ER_ACCESS_DENIED_ERROR 账号/密码/权限拒绝.
@@ -73,11 +66,7 @@ enum UsqlError
 /// 操作错误信息.
 struct SqlError
 {
-    bool ok = true;           ///< 是否成功.
-    bool timeout = false;     ///< 是否超时失败.
-    int err_no = 0;           ///< 0 成功; 负值 = 系统错误 (框架 -200/-201,
-                              ///< MySQL 原码取负, 见 UsqlError 枚举);
-                              ///< 正值预留给上层业务逻辑码.
+    int ret_code = 0;         ///< 0 成功; !0 失败.
     std::string err_msg;      ///< 错误描述.
     std::string sqlstate;     ///< SQLSTATE.
 
@@ -218,23 +207,21 @@ uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
     if (out == nullptr)
     {
         SelectResult res;
-        res.ok = false;
-        res.err_no = kBadArgument;
+        res.ret_code = kBadArgument;
         res.err_msg = "usql: uselect: out is nullptr";
         co_return res;
     }
     out->Clear();
     T proto;
     SelectResult res = co_await uselect(mysql, std::move(sql), ts);
-    if (!res.ok)
+    if (res.ret_code != 0)
     {
         co_return res; // 执行失败, 原样带错误信息.
     }
     if (!res.check_alignment(proto.GetDescriptor()))
     {
         // 对齐失败详情已由 check_alignment 记 SYSERR.
-        res.ok = false;
-        res.err_no = kBadArgument;
+        res.ret_code = kBadArgument;
         res.err_msg = "usql: uselect: columns not aligned with proto fields";
         co_return res;
     }
@@ -244,8 +231,7 @@ uco::task<SelectResult> uselect(MYSQL *mysql, std::string sql,
         {
             // 绑定失败详情已由 bind_row 记 SYSERR; 回滚半填充状态.
             out->Clear();
-            res.ok = false;
-            res.err_no = kBadArgument;
+            res.ret_code = kBadArgument;
             res.err_msg = "usql: uselect: bind row failed";
             co_return res;
         }
@@ -288,14 +274,12 @@ class upool
         uco_time_t ts = {10, 0};        ///< 建连超时.
     };
 
-    static upool &GetInstance();
-
+    upool(const config &cfg);
+   ~upool();
     upool(const upool &) = delete;
     upool &operator=(const upool &) = delete;
     upool(upool &&) = delete;
     upool &operator=(upool &&) = delete;
-
-    void Init(const config &cfg);
 
     /**
      * @brief 获取连接: 优先复用空闲, 否则新建; 达到 max_size 则等待.
@@ -311,8 +295,8 @@ class upool
     void Close();
 
   private:
-     upool();
-    ~upool();
+    /// 初始化状态并启动 reaper. 仅由构造函数调用, 不可重复执行.
+    void Init(const config &cfg);
 
     /// 内部状态: shared_ptr 共享所有权 (reaper 协程与进行中的 acquire 各持
     /// 一份), 保证池析构后协程仍能安全访问状态并自行退出.
@@ -343,9 +327,10 @@ class upool
 class UsqlGuard
 {
 public:
-    UsqlGuard(MYSQL *conn) : conn_(conn) {}
-    ~UsqlGuard() { upool::GetInstance().Release(conn_); }
+    UsqlGuard(upool &pool, MYSQL *conn) : pool_(pool), conn_(conn) {}
+    ~UsqlGuard() { pool_.Release(conn_); }
 private:
+    upool &pool_;
     MYSQL *conn_ = 0;
 };
 

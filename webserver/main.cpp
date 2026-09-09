@@ -1,11 +1,17 @@
+#include "controller/user.h"
+#include "dao/user_mysql.h"
+#include "service/user.h"
 #include "httpserver.h"
+#include "session.h"
 #include "uco.h"
 #include "udaemon.h"
 #include "ulog.h"
-#include "user.pb.h"
+#include "demo.pb.h"
 #include <cstdio>
 #include <sys/eventfd.h>
 #include <unistd.h>
+#include "usql.h"
+#include "uredis.h"
 
 HttpServer httpserver;
 
@@ -95,6 +101,62 @@ task<void> head(HttpContext *context)
 //     co_return;
 // }
 
+auto MakeMySqLPool()
+{
+    usql::upool::config config;
+    config.host = "127.0.0.1";
+    config.user = "root";
+    config.pass = "123456";
+    config.db = "webserver";
+    config.max_size = 16;
+    return usql::upool(config);
+}
+
+auto MakeRedisPool()
+{
+    uredis::upool::config config;
+    config.max_size = 16;
+    return uredis::upool(config);
+}
+
+task<void> RunHttpServer()
+{
+    auto mysql_pool = MakeMySqLPool();
+    auto redis_pool = MakeRedisPool();
+    webserver::dao::MySqlUserDao userDAO(mysql_pool);
+    webserver::service::UserService userService(userDAO);
+    webserver::controller::UserController userController(userService);
+
+    SessionStore::Config session_cfg;
+    session_cfg.secret_key = "uco-session-secret";
+    SessionStore store(session_cfg, redis_pool);
+    const std::string kSessionName = "uco_session";
+
+    // ---- 鉴权路由 (cookie + session + csrf, 中间件挂链首) ----
+    httpserver.GET("/api/csrf", Sessions(&store, kSessionName),
+                   MakeHandler(userController, Csrf));
+    httpserver.GET("/api/me", Sessions(&store, kSessionName),
+                   MakeHandler(userController, CurrentUser));
+    httpserver.GET("/register", Sessions(&store, kSessionName),
+                   MakeHandler(userController, RegisterPage));
+    httpserver.POST("/register", Sessions(&store, kSessionName),
+                    MakeHandler(userController, Register));
+    httpserver.GET("/login", Sessions(&store, kSessionName),
+                   MakeHandler(userController, LoginPage));
+    httpserver.POST("/login", Sessions(&store, kSessionName),
+                    MakeHandler(userController, Login));
+    httpserver.POST("/logout", Sessions(&store, kSessionName),
+                    MakeHandler(userController, Logout));
+    httpserver.GET("/welcome", Sessions(&store, kSessionName),
+                   MakeHandler(userController, WelcomePage));
+
+    int ret = co_await httpserver.Run();
+    if (ret != 0)
+    {
+        LOGFTL("Server run error: %d", ret);
+    }
+}
+
 int main(int argc, const char *argv[])
 {
     uco::OpenLog("ucohttpsvr", LogLevel::INFO, LogMode::CONSOLE, true);
@@ -107,9 +169,6 @@ int main(int argc, const char *argv[])
     httpserver.Static("/music/*filename");
 
     httpserver.Static("/index.html");
-    httpserver.Static("/register.html");
-    httpserver.Static("/login.html");
-    httpserver.Static("/welcome.html");
     httpserver.Static("/video.html");
     httpserver.Static("/picture.html");
 
@@ -119,13 +178,14 @@ int main(int argc, const char *argv[])
     httpserver.ErrorPage(500, "500.html");
     httpserver.ErrorTemplate("templates/error.html");
 
-    httpserver.Forward("/", "/index.html");
-    httpserver.Forward("/index", "/index.html");
-    httpserver.Forward("/register", "/register.html");
-    httpserver.Forward("/login", "/login.html");
-    httpserver.Forward("/welcome", "/welcome.html");
-    httpserver.Forward("/video", "/video.html");
-    httpserver.Forward("/picture", "/picture.html");
+    httpserver.Forward(eGet, "/", "/index.html");
+    httpserver.Forward(eGet, "/index", "/index.html");
+    httpserver.Forward(eGet, "/video", "/video.html");
+    httpserver.Forward(eGet, "/picture", "/picture.html");
+    // 直链 .html 一律经动态路由 (登录态检查), 防绕过.
+    httpserver.Forward(eGet, "/login.html", "/login");
+    httpserver.Forward(eGet, "/register.html", "/register");
+    httpserver.Forward(eGet, "/welcome.html", "/welcome");
 
     // httpserver.GET("/hello", middleware1, middleware2, middleware3, hello);
     httpserver.GET("/redirect", redirect);
@@ -134,6 +194,6 @@ int main(int argc, const char *argv[])
     httpserver.HEAD("/head", head);
     // httpserver.POST("/post", post);
     httpserver.Init(8080, 4, 100, 30);
-    httpserver.Run();
+    go RunHttpServer();
     return 0;
 }

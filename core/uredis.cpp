@@ -173,8 +173,7 @@ struct parser
             out.str.assign(buf, b, e - b);
             if (t == '-')
             { // 服务端错误回复, 连接仍健康.
-                out.ok = false;
-                out.err_no = kServerError;
+                out.ret_code = kServerError;
                 out.err_msg = out.str;
             }
             return 0;
@@ -321,15 +320,13 @@ static uco::task<int> read_reply(uconnection *c, Reply &out, deadline &dl)
 /// 填充错误信息 (r 为负的 errno).
 static void fill_error(RedisError &e, int r)
 {
-    e.ok = false;
     if (r == -ETIME)
     {
-        e.timeout = true;
-        e.err_no = kTimeout;
+        e.ret_code = kTimeout;
         e.err_msg = "uredis: operation timeout";
         return;
     }
-    e.err_no = r; // 传输层 errno 取负 (见 UredisError).
+    e.ret_code = r; // 传输层 errno 取负 (见 UredisError).
     e.err_msg = std::string("uredis: ") + strerror(-r);
 }
 
@@ -337,8 +334,9 @@ bool RedisError::Retryable() const
 {
     // 可重试: 超时 / 传输层错误 (连接断, 重连即可);
     // 不可重试: 服务端错误 (重试同错) / 参数非法.
-    return timeout || err_no == kTimeout ||
-           (err_no < 0 && err_no != kBadArgument && err_no != kServerError);
+    return ret_code == kTimeout ||
+           (ret_code < 0 && ret_code != kBadArgument &&
+            ret_code != kServerError);
 }
 
 // ==================== 连接 ====================
@@ -390,7 +388,7 @@ uco::task<uconnection *> uconnect(const char *host, unsigned int port,
         args.emplace_back("AUTH");
         args.emplace_back(pass);
         Reply rep = co_await ucommand(c, std::move(args), ts);
-        if (!rep.ok)
+        if (rep.ret_code != 0)
         {
             SYSERR("uredis: auth failed:", rep.err_msg);
             uclose(c);
@@ -406,7 +404,7 @@ uco::task<uconnection *> uconnect(const char *host, unsigned int port,
         args.emplace_back("SELECT");
         args.emplace_back(std::to_string(db));
         Reply rep = co_await ucommand(c, std::move(args), ts);
-        if (!rep.ok)
+        if (rep.ret_code != 0)
         {
             SYSERR("uredis: select db failed:", rep.err_msg);
             uclose(c);
@@ -439,8 +437,7 @@ uco::task<Reply> ucommand(uconnection *c, std::vector<std::string> args,
     Reply ret;
     if (c == nullptr || c->fd < 0 || c->broken || args.empty())
     {
-        ret.ok = false;
-        ret.err_no = kBadArgument;
+        ret.ret_code = kBadArgument;
         ret.err_msg = "uredis: invalid connection or empty args";
         co_return ret;
     }
@@ -555,15 +552,12 @@ void upool::Init(const config &cfg)
     go reaper(st_);
 }
 
-upool::upool() {}
+upool::upool(const config &cfg)
+{
+    Init(cfg);
+}
 
 upool::~upool() { Close(); }
-
-upool& upool::GetInstance()
-{
-    static upool instance;
-    return instance;
-}
 
 /// 后台缩容协程: 每 reap_interval_ms 关闭一个 idle, 保底 min_idle.
 /// 睡在可取消定时器上, close() 经 waker.wake() 立即唤醒 (微秒级),
@@ -838,7 +832,7 @@ uco::task<bool> ulock::do_renew(std::shared_ptr<state> st)
     args.emplace_back(token);
     args.emplace_back(std::to_string(st->cfg.ttl_ms));
     Reply r = co_await ucommand(st->c, std::move(args), st->cfg.ts);
-    bool ok = r.ok && r.type == Reply::INTEGER && r.integer == 1;
+    bool ok = r.ret_code == 0 && r.type == Reply::INTEGER && r.integer == 1;
     if (!ok)
     { // 锁已丢失 (过期被他人抢走) 或命令失败: 标记未持有.
         std::lock_guard<std::mutex> g(st->token_mtx);
@@ -897,7 +891,7 @@ uco::task<bool> ulock::TryAcquire()
     args.emplace_back("PX");
     args.emplace_back(std::to_string(st_->cfg.ttl_ms));
     Reply r = co_await ucommand(st_->c, std::move(args), st_->cfg.ts);
-    if (!r.ok || r.type != Reply::STATUS || r.str != "OK")
+    if (r.ret_code != 0 || r.type != Reply::STATUS || r.str != "OK")
     { // NIL: 被他人持有; 其余: 命令失败.
         co_return false;
     }
@@ -982,7 +976,7 @@ uco::task<bool> ulock::Release()
     args.emplace_back(st_->cfg.key);
     args.emplace_back(token);
     Reply r = co_await ucommand(st_->c, std::move(args), st_->cfg.ts);
-    co_return r.ok && r.type == Reply::INTEGER && r.integer == 1;
+    co_return r.ret_code == 0 && r.type == Reply::INTEGER && r.integer == 1;
 }
 
 uco::task<bool> ulock::ReNew() { co_return co_await do_renew(st_); }
