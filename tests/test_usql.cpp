@@ -1,6 +1,6 @@
-#include "ulog.h"
-#include "usql.h"
-#include "user.pb.h"
+#include "core/ulog.h"
+#include "core/usql.h"
+#include "server/dao/user.pb.h"
 #include <chrono>
 #include <vector>
 
@@ -16,7 +16,7 @@ task<void> demo1(usql::upool& pool)
         co_return;
     }
 
-    webserver::user::UserList users;
+    webserver::dao::UserList users;
 
     auto ret = co_await usql::uselect(m, "SELECT * FROM user", users.mutable_userlist());
     if (ret.ret_code != 0)
@@ -37,7 +37,7 @@ task<void> demo2(usql::upool& pool)
         co_return;
     }
 
-    webserver::user::User user;
+    webserver::dao::User user;
 
     auto ret = co_await usql::uselect(m, "SELECT * FROM `user` WHERE username = 'root'", &user);
     if (ret.ret_code != 0)

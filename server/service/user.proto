@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+// user 领域 service 层: 出入参.
+package webserver.service;
+
+// ---- service 出入参 (返回码: 0 成功 / >0 业务失败 / -1 不可重试 / -2 可重试) ----
+
+message RegisterReq {
+  string username = 1;
+  string password = 2; // 明文 (传输安全由 HTTPS 保证, 加密在 service).
+}
+message RegisterRsp {
+  uint64 vid = 1;
+  string username = 2;
+}
+
+message LoginReq {
+  string username = 1;
+  string password = 2; // 明文 (传输安全由 HTTPS 保证, 校验在 service).
+}
+message LoginRsp {
+  uint64 vid = 1;
+  string username = 2;
+}

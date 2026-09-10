@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+// user 领域 controller 层: HTTP 响应体 (Http 前缀区分于 service 层消息).
+package webserver.controller;
+
+// 统一响应信封: 所有 Http*Rsp 必含顶层 code/msg, 端点字段嵌套 Body:
+//   - HTTP status 管协议层 (中间件拒绝/解析错误),
+//     code 管业务层 (0 成功; 1 业务降级; 其余镜像 status);
+//   - 错误响应省略 body (proto3 默认值不序列化);
+//   - code/msg 标 optional: 0/"" 是合法值, 依赖 presence 保证
+//     "必含" (无 optional 时 code=0 会被 JSON 序列化省略).
+
+// /register POST 响应.
+message HttpRegisterRsp {
+  message Body {
+    uint64 vid = 1;
+    string username = 2;
+  }
+  optional int32 code = 1;     // 0 成功 (已即登录, 跳 /welcome);
+                      // 1 账号已建但自动登录失败 (跳 /login 手动登录);
+                      // 400 参数非法 (含"密码过于简单");
+                      // 409 用户名已被占用; 403 CSRF 校验失败; 500 系统错误.
+  optional string msg = 2;
+  Body body = 3;
+}
+
+// /login POST 响应; 凭证错误统一文案, 防用户名枚举.
+message HttpLoginRsp {
+  message Body {
+    uint64 vid = 1;
+    string username = 2;
+  }
+  optional int32 code = 1;     // 0 成功; 401 凭证错误; 403 CSRF 校验失败; 500 系统错误.
+  optional string msg = 2;
+  Body body = 3;
+}
+
+// /logout POST 响应 (无业务字段).
+message HttpLogoutRsp {
+  optional int32 code = 1; // 0 成功; 403 CSRF 校验失败; 500 系统错误.
+  optional string msg = 2;
+}
+
+// /api/csrf GET 响应 (实现为框架层手写 JSON, 见 src/csrf.cpp;
+// 此消息仅作文档 — 单一文档源).
+message HttpCsrfRsp {
+  message Body {
+    string csrf_token = 1;
+  }
+  optional int32 code = 1; // 0 成功.
+  optional string msg = 2;
+  Body body = 3;
+}
+
+// /api/me GET 响应.
+message HttpCurrentUserRsp {
+  message Body {
+    string username = 1;
+  }
+  optional int32 code = 1; // 0 成功; 401 未登录.
+  optional string msg = 2;
+  Body body = 3;
+}

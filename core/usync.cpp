@@ -1,8 +1,5 @@
 #define _UCO_THREAD_ENV_IMPL
 #include <thread>
-#include "usync.h"
-#include "uco.h"
-#include "ulog.h"
 #include <atomic>
 #include <cassert>
 #include <cerrno>
@@ -14,6 +11,10 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 #include <unordered_set>
+
+#include "core/uco.h"
+#include "core/ulog.h"
+#include "core/usync.h"
 
 namespace uco
 {

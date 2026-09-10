@@ -1,6 +1,6 @@
 #define _UCO_THREAD_ENV_IMPL
-#include "usql.h"
-#include "ulog.h"
+#include "core/usql.h"
+#include "core/ulog.h"
 
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/message.h>

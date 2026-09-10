@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+// user 领域 dao 层: 表模型与出入参.
+package webserver.dao;
+
+// ---- 模型 ----
+
+// 表镜像 (含密文), 仅 service 内部使用.
+message User {
+  uint64 vid = 1;
+  string username = 2;
+  string password = 3;
+}
+
+message UserList {
+  repeated User userlist = 1;
+}
+
+message UserInfo {
+  uint64 vid = 1;
+  string username = 2;
+}
+
+// ---- dao 出入参 (返回码: 0 成功 / 1 业务未命中 / -1 不可重试 / -2 可重试) ----
+
+message InsertUserReq {
+  uint64 vid = 1;           // 业务生成, 避开 0.
+  string username = 2;
+  string password_hash = 3; // bcrypt 密文.
+}
+message InsertUserRsp {} // 预留: insert_id 等.
+
+message QueryByUsernameReq {
+  string username = 1;
+}
+message QueryByUsernameRsp {
+  uint64 vid = 1;
+  string username = 2;
+  string password_hash = 3;
+}
+
+message QueryByVidReq {
+  uint64 vid = 1;
+}
+message QueryByVidRsp {
+  uint64 vid = 1;
+  string username = 2;
+}
+
+message UpdatePasswordReq {
+  uint64 vid = 1;
+  string password_hash = 2; // 新密文 (bcrypt).
+}
+message UpdatePasswordRsp {}

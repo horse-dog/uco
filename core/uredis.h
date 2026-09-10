@@ -12,8 +12,8 @@
  *       host 仅支持点分 IPv4, 域名请自行解析后传入.
  */
 
-#include "uio.h"
-#include "usync.h"
+#include "core/uio.h"
+#include "core/usync.h"
 
 #include <atomic>
 #include <cerrno>

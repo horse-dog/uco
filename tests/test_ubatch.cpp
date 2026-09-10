@@ -1,8 +1,8 @@
 
-#include "uco.h"
-#include "uio.h"
-#include "ulog.h"
-#include "usync.h"
+#include "core/uco.h"
+#include "core/uio.h"
+#include "core/ulog.h"
+#include "core/usync.h"
 #include <cstdio>
 #include <thread>
 using namespace uco;

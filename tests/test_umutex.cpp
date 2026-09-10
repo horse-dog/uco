@@ -1,6 +1,6 @@
-#include "uco.h"
-#include "ulog.h"
-#include "usync.h"
+#include "core/uco.h"
+#include "core/ulog.h"
+#include "core/usync.h"
 #include <cstdint>
 #include <thread>
 #include <vector>

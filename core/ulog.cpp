@@ -14,8 +14,8 @@
 #include <ctime>
 #include <cstring>
 
-#include "ulog.h"
-#include "ulogshm_def.h"
+#include "core/ulog.h"
+#include "core/ulogshm_def.h"
 
 namespace uco
 {

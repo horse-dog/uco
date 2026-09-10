@@ -13,8 +13,8 @@
  * @note 防 SQL 注入请使用 uescape().
  */
 
-#include "uio.h"
-#include "usync.h"
+#include "core/uio.h"
+#include "core/usync.h"
 
 #include <mysql/mysql.h>
 #include <google/protobuf/message.h>

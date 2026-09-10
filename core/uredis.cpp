@@ -1,6 +1,6 @@
 #define _UCO_THREAD_ENV_IMPL
-#include "uredis.h"
-#include "ulog.h"
+#include "core/uredis.h"
+#include "core/ulog.h"
 
 #include <arpa/inet.h>
 #include <cerrno>

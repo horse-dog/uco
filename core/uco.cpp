@@ -3,8 +3,8 @@
 #include <thread>
 #include <vector>
 #define _UCO_THREAD_ENV_IMPL
-#include "uco.h"
-#include "ulog.h"
+#include "core/uco.h"
+#include "core/ulog.h"
 
 #include <cerrno>
 #include <cstring>

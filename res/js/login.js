@@ -4,7 +4,8 @@
  *
  * 流程:
  *   1. 页面加载即取 csrf token (服务端同时种下 session cookie);
- *   2. 前端预校验 + 防重复提交, fetch 提交 username/password/csrf_token;
+ *   2. 前端预校验 + 防重复提交, fetch 提交 username/password
+ *      (csrf_token 走 X-CSRF-Token 头);
  *   3. 按 JSON 响应联动 UI: 错误使用浮层提示 + 输入框变色 + 聚焦,
  *      输入即清错; 凭证错误清空密码框; 403 时刷新 token 供重试.
  */
@@ -46,8 +47,8 @@ function showToast(text) {
     toastTimer = setTimeout(hideToast, 3000);
 }
 
-/** 一次性跳转提示：未登录跳转由 cookie 传递，注册成功由同标签页
- *  sessionStorage 传递；读取后立即删除，刷新时不重复出现. */
+/** 一次性跳转提示：未登录跳转由 cookie 传递，注册后自动登录失败由
+ *  同标签页 sessionStorage 传递；读取后立即删除，刷新时不重复出现. */
 (function showLoginNotice() {
     const cookies = Object.fromEntries(
         document.cookie.split('; ').map(c => c.split('=')));
@@ -111,7 +112,7 @@ form.addEventListener('input', clearError);
 // 取 csrf token (服务端同时种下 session cookie).
 fetch('/api/csrf')
     .then(r => r.ok ? r.json() : Promise.reject(r.status))
-    .then(d => { csrfToken = d.csrf_token; })
+    .then(d => { csrfToken = d.body.csrf_token; })
     .catch(() => showError(errMsg.fetchCsrf));
 
 form.addEventListener('submit', async (ev) => {
@@ -130,12 +131,12 @@ form.addEventListener('submit', async (ev) => {
     try {
         const body = new URLSearchParams({
             username: usernameInput.value.trim(),
-            password: passwordInput.value,
-            csrf_token: csrfToken
+            password: passwordInput.value
         });
         const resp = await fetch('/login', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded',
+                       'X-CSRF-Token': csrfToken },
             body: body
         });
         const data = await resp.json();
@@ -149,7 +150,7 @@ form.addEventListener('submit', async (ev) => {
         } else if (resp.status === 403) { // token 过期/失效: 刷新供重试.
             showError(errMsg.csrfFailed);
             const r = await fetch('/api/csrf');
-            if (r.ok) csrfToken = (await r.json()).csrf_token;
+            if (r.ok) csrfToken = (await r.json()).body.csrf_token;
         } else if (resp.status === 400) {
             showError(errMsg.missingField);
         } else {

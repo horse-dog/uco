@@ -2,9 +2,9 @@
 // 基础睡眠路径 / 醒着时唤醒 / 跨线程唤醒 / 唤醒已到期的睡眠 /
 // 唤醒与到期同时发生 / 多定时器堆重排 / 堆中摘除非堆顶睡眠 /
 // 中途插入更早的睡眠 / 竞态压力 / 冲突睡眠 / 析构安全.
-#include "usync.h"
-#include "uio.h"
-#include "ulog.h"
+#include "core/usync.h"
+#include "core/uio.h"
+#include "core/ulog.h"
 
 #include <chrono>
 #include <cstdio>

@@ -20,8 +20,8 @@
 #include <unistd.h>
 #include <unordered_set>
 
-#include "udaemon.h"
-#include "ulogshm_def.h"
+#include "core/udaemon.h"
+#include "core/ulogshm_def.h"
 
 constexpr size_t MAX_LOG_FILE_SIZE = 5UL * 1024 * 1024 * 1024; // 5GB.
 constexpr size_t FLUSH_BYTE_THRESHOLD = 12 * 1024;

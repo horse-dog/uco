@@ -5,8 +5,9 @@
  * 流程:
  *   1. 页面加载即取 csrf token (服务端同时种下 session cookie);
  *   2. 前端预校验 (非空/长度/两次密码一致);
- *   3. fetch 提交 username/password/csrf_token;
- *   4. 成功后跳转登录页; 403 时刷新 token 供重试.
+ *   3. fetch 提交 username/password (csrf_token 走 X-CSRF-Token 头);
+ *   4. 成功即登录 (服务端已建立登录态并轮换 session), 跳转欢迎页;
+ *      403 时刷新 token 供重试.
  */
 
 const form = document.getElementById('register-form');
@@ -78,7 +79,7 @@ form.addEventListener('input', clearError);
 
 fetch('/api/csrf')
     .then(r => r.ok ? r.json() : Promise.reject(r.status))
-    .then(d => { csrfToken = d.csrf_token; })
+    .then(d => { csrfToken = d.body.csrf_token; })
     .catch(() => showError(errMsg.fetchCsrf));
 
 form.addEventListener('submit', async (ev) => {
@@ -112,22 +113,29 @@ form.addEventListener('submit', async (ev) => {
     try {
         const body = new URLSearchParams({
             username: username,
-            password: password,
-            csrf_token: csrfToken
+            password: password
         });
         const resp = await fetch('/register', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded',
+                       'X-CSRF-Token': csrfToken },
             body: body
         });
         const data = await resp.json();
 
+        if (resp.ok && data.code === 0) {
+            // 注册即登录: 登录态与新 cookie 已随本响应建立, 直跳欢迎页
+            // (未登录会被 /welcome 服务端弹回 /login).
+            window.location.href = '/welcome';
+            return;
+        }
         if (resp.ok) {
-            // 同标签页携带一次性成功提示，不依赖已销毁的匿名 session.
+            // code=1: 账号已建但自动登录失败 (服务端故障), 跳登录页
+            // 手动登录 (携带一次性提示).
             try {
                 sessionStorage.setItem('login_notice', 'registered');
             } catch (e) {
-                // 存储不可用不影响主流程.
+                // 存储不可用不影响跳转.
             }
             window.location.href = '/login';
             return;
@@ -137,7 +145,7 @@ form.addEventListener('submit', async (ev) => {
         } else if (resp.status === 403) {
             showError(errMsg.csrfFailed);
             const r = await fetch('/api/csrf');
-            if (r.ok) csrfToken = (await r.json()).csrf_token;
+            if (r.ok) csrfToken = (await r.json()).body.csrf_token;
         } else if (resp.status === 400) {
             // 400 含"密码过于简单"(后端黑名单, 前端无法预判), 透传后端 msg.
             showError(data.msg || errMsg.badParams);
