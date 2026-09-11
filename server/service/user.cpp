@@ -1,21 +1,15 @@
 /**
  * @file user.cpp
  * @brief 用户业务逻辑实现 (UserService), 见 service/user.h.
- *
- * bcrypt 依赖 libxcrypt 的 crypt_r (线程安全, $2b$ 慢哈希):
- *   哈希: crypt_r(plain, "$2b$12$" + salt, &data)
- *   校验: crypt_r(plain, stored_hash, &data) == stored_hash
  */
 
 #include "server/service/user.h"
 
 #include "core/ulog.h"
 
-#include <crypt.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <openssl/crypto.h>
 #include <openssl/rand.h>
 #include <stdexcept>
 
@@ -24,53 +18,10 @@ namespace webserver
 namespace service
 {
 
-UserService::UserService(dao::IUserDao &dao) : m_dao(dao)
+UserService::UserService(dao::IUserDao &dao,
+                         security::IPasswordHasher &hasher)
+: m_dao(dao), m_hasher(hasher)
 {
-}
-
-/// bcrypt 哈希 (cost 12, 随机盐); 失败返回空串.
-/// 输出固定 60 字符: $2b$12$ + 22 盐 + 31 哈希.
-static std::string bcrypt_hash(const std::string &plain)
-{
-    // bcrypt 使用 128 bit 原始随机盐。让 libxcrypt 负责 bcrypt-base64
-    // 编码，避免手工生成 22 字符 setting 时发生随机缓冲区越界。
-    std::array<unsigned char, 16> rnd{};
-    if (RAND_bytes(rnd.data(), static_cast<int>(rnd.size())) != 1)
-    {
-        LOGERR("register: rand_bytes failed for salt");
-        return "";
-    }
-
-    std::array<char, CRYPT_GENSALT_OUTPUT_SIZE> setting{};
-    if (crypt_gensalt_rn("$2b$", 12,
-                         reinterpret_cast<const char *>(rnd.data()),
-                         static_cast<int>(rnd.size()), setting.data(),
-                         static_cast<int>(setting.size())) == nullptr)
-    {
-        LOGERR("register: crypt_gensalt_rn failed, errno:", errno,
-               "msg:", strerror(errno));
-        return "";
-    }
-
-    struct crypt_data data {};
-    char *hash = crypt_r(plain.c_str(), setting.data(), &data);
-    return (hash != nullptr) ? std::string(hash) : "";
-}
-
-/// bcrypt 校验: 恒时比对 (CRYPTO_memcmp 防时序侧信道).
-static bool bcrypt_verify(const std::string &plain, const std::string &hash)
-{
-    if (hash.rfind("$2b$", 0) != 0 || hash.size() != 60)
-    {
-        return false; // 存量数据异常, 拒绝.
-    }
-    struct crypt_data data {};
-    char *out = crypt_r(plain.c_str(), hash.c_str(), &data);
-    if (out == nullptr)
-    {
-        return false;
-    }
-    return CRYPTO_memcmp(out, hash.data(), hash.size()) == 0;
 }
 
 /// 生成业务用户ID: 48bit 注册毫秒时间戳 << 16 | 15bit 随机 | 1.
@@ -167,11 +118,13 @@ uco::task<int> UserService::Register(const service::RegisterReq &req,
     //    极端情况下主键冲突会以"用户名已被占用"返回, 可重试).
     uint64_t vid = NewVid();
 
-    // 3. bcrypt 加密 (cost 12 慢哈希, 防拖库离线爆破).
-    std::string hash = bcrypt_hash(req.password());
-    if (hash.empty())
+    // 3. bcrypt 加密 (cost 12 慢哈希, 在线程池中执行).
+    std::string hash;
+    int ret = co_await m_hasher.Hash(req.password(), hash);
+    if (ret != 0)
     {
-        LOGERR("register: bcrypt hash failed, username:", req.username());
+        LOGERR("register: bcrypt hash failed, username:", req.username(),
+               ", ret:", ret);
         co_return -1;
     }
 
@@ -181,7 +134,7 @@ uco::task<int> UserService::Register(const service::RegisterReq &req,
     dreq.set_username(req.username());
     dreq.set_password_hash(hash);
     dao::InsertUserRsp drsp;
-    int ret = co_await m_dao.InsertUser(dreq, drsp);
+    ret = co_await m_dao.InsertUser(dreq, drsp);
     if (ret != 0)
     {
         if (ret == 1)
@@ -208,20 +161,29 @@ uco::task<int> UserService::Login(const service::LoginReq &req,
     dreq.set_username(req.username());
     dao::QueryByUsernameRsp drsp;
     int ret = co_await m_dao.QueryByUsername(dreq, drsp);
-    if (ret != 0)
+    const bool user_exists = ret == 0;
+    if (ret < 0)
     {
-        if (ret == 1)
-        {
-            LOGMSG("login: no such user, username:", req.username());
-            co_return 1; // 用户不存在.
-        }
         LOGERR("login: dao query failed, username:", req.username(),
                ", ret:", ret);
         co_return ret; // -1/-2 系统错误透传.
     }
 
-    // 2. bcrypt 校验 (慢哈希比对; 无论结果耗时相近, 防用户枚举侧信道).
-    if (!bcrypt_verify(req.password(), drsp.password_hash()))
+    // 2. 用户不存在也执行同 cost 的 bcrypt，降低基于耗时的账号枚举风险.
+    ret = user_exists
+              ? co_await m_hasher.Verify(req.password(), drsp.password_hash())
+              : co_await m_hasher.VerifyDummy(req.password());
+    if (ret < 0)
+    {
+        LOGERR("verify failed, ret:", ret);
+        co_return -1;
+    }
+    if (!user_exists)
+    {
+        LOGMSG("login: no such user, username:", req.username());
+        co_return 1;
+    }
+    if (ret == 1)
     {
         LOGWRN("login: wrong password, username:", req.username());
         co_return 2; // 密码错误.

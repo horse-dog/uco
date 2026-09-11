@@ -35,11 +35,11 @@ std::string HttpContext::GetRequestUrl() const { return m_ptrReq->m_sPath; }
 
 const std::string &HttpContext::ClientIP() const { return m_sClientIP; }
 
-#define CHECK_HAS_SET_RSPCONTENT                                               \
+// 覆盖写: 已写过则先清 body 相关字段, 后写覆盖先写 (对齐 gin).
+#define OVERWRITE_RSPCONTENT                                                   \
     if (m_bHasSetRspContent)                                                   \
     {                                                                          \
-        LOGERR("already set responce body");                                   \
-        return;                                                                \
+        m_ptrRsp->ResetContent();                                              \
     }                                                                          \
     m_bHasSetRspContent = true
 
@@ -48,7 +48,7 @@ void HttpContext::Json(int httpRetCode,
 {
     if (m_ptrRsp)
     {
-        CHECK_HAS_SET_RSPCONTENT;
+        OVERWRITE_RSPCONTENT;
         m_ptrRsp->m_httpRspContentType =
             HttpResponse::PathSuffix2FileType(".json");
         m_ptrRsp->m_iHttpRetCode = httpRetCode;
@@ -69,7 +69,7 @@ void HttpContext::String(int httpRetCode, const std::string &msg)
 {
     if (m_ptrRsp)
     {
-        CHECK_HAS_SET_RSPCONTENT;
+        OVERWRITE_RSPCONTENT;
         m_ptrRsp->m_httpRspContentType =
             HttpResponse::PathSuffix2FileType(".txt");
         m_ptrRsp->m_iHttpRetCode = httpRetCode;
@@ -82,7 +82,7 @@ void HttpContext::Data(int httpRetCode, const std::string &contentType,
 {
     if (m_ptrRsp)
     {
-        CHECK_HAS_SET_RSPCONTENT;
+        OVERWRITE_RSPCONTENT;
         m_ptrRsp->m_httpRspContentType = contentType;
         m_ptrRsp->m_iHttpRetCode = httpRetCode;
         m_ptrRsp->m_httpRspContentBuffer.Append(data);
@@ -108,7 +108,7 @@ void HttpContext::HTML(int httpRetCode, const std::string &templatePath,
     }
     if (m_ptrRsp)
     {
-        CHECK_HAS_SET_RSPCONTENT;
+        OVERWRITE_RSPCONTENT;
         m_ptrRsp->m_httpRspContentType =
             HttpResponse::PathSuffix2FileType(".html");
         m_ptrRsp->m_iHttpRetCode = httpRetCode;
@@ -129,7 +129,7 @@ void HttpContext::HTML(int httpRetCode, const std::string &templatePath,
     }
     if (m_ptrRsp)
     {
-        CHECK_HAS_SET_RSPCONTENT;
+        OVERWRITE_RSPCONTENT;
         m_ptrRsp->m_httpRspContentType =
             HttpResponse::PathSuffix2FileType(".html");
         m_ptrRsp->m_iHttpRetCode = httpRetCode;
@@ -154,7 +154,7 @@ void HttpContext::HTML(int httpRetCode, const std::string &htmlPath)
 {
     if (m_ptrRsp)
     {
-        CHECK_HAS_SET_RSPCONTENT;
+        OVERWRITE_RSPCONTENT;
         m_ptrRsp->m_httpRspContentType =
             HttpResponse::PathSuffix2FileType(".html");
         m_ptrRsp->m_iHttpRetCode = httpRetCode;
@@ -166,7 +166,7 @@ void HttpContext::File(const std::string &filepath)
 {
     if (m_ptrRsp)
     {
-        CHECK_HAS_SET_RSPCONTENT;
+        OVERWRITE_RSPCONTENT;
         m_ptrRsp->m_httpRspStaticResourcePath = filepath;
     }
 }
@@ -183,7 +183,7 @@ void HttpContext::GenErrorPage(int httpRetCode)
 {
     if (m_ptrRsp)
     {
-        m_bHasSetRspContent = true;
+        OVERWRITE_RSPCONTENT;
         m_ptrRsp->ShouldGenErrorPage(httpRetCode);
     }
 }
@@ -192,7 +192,7 @@ void HttpContext::Redirect(int httpRetCode, const std::string &location)
 {
     if (m_ptrRsp)
     {
-        CHECK_HAS_SET_RSPCONTENT;
+        OVERWRITE_RSPCONTENT;
         m_ptrRsp->m_iHttpRetCode = httpRetCode;
         SetHeader("Location", location);
     }
@@ -514,12 +514,13 @@ uco::task<void> HttpContext::Next()
     co_return;
 }
 
-void HttpContext::Set(const std::string &key, void *value)
+HttpContext::StoreGuard HttpContext::Store(const std::string &key, void *value)
 {
     m_mapUserData[key] = value;
+    return StoreGuard(this, key, value);
 }
 
-void *HttpContext::Get(const std::string &key) const
+void *HttpContext::Load(const std::string &key) const
 {
     auto it = m_mapUserData.find(key);
     return it == m_mapUserData.end() ? nullptr : it->second;
@@ -747,8 +748,14 @@ HttpServer::~HttpServer()
     {
         close(m_iSignalFd);
     }
+
+    for (auto &thread : m_vecThreads)
+    {
+        thread.join();
+    }
+
     m_vecWorkers.clear();
-    // 这里打印日志依赖全局变量和TLS，但这些数据是基础数据类型，因此此时仍然可用.
+    m_vecThreads.clear();
     SYSMSG("Server Exit...");
 }
 
@@ -757,6 +764,10 @@ HttpServer::HttpServer(int port, int num_threads, int keepalivecnt,
                        int keepalivesec, int recvtimeoutsec,
                        int sendtimeoutsec, const std::string &resourceDir)
 {
+    if (num_threads <= 0)
+    {
+        SYSFTL("num_threads must be > 0");
+    }
     Init(port, num_threads, keepalivecnt, keepalivesec, recvtimeoutsec,
          sendtimeoutsec, resourceDir);
 }
@@ -776,7 +787,6 @@ void HttpServer::Init(int port, int num_threads, int keepalivecnt,
     setup_signalfd();
 }
 
-#include "core/uio.h"
 uco::task<void> HttpServer::Run()
 {
     // 连接池由使用方 (如 main 的 RunHttpServer) 初始化与关闭,
@@ -798,6 +808,9 @@ uco::task<void> HttpServer::Run()
     // go 出来的协程依赖 server 的生命周期.
     // go 出来的协程只保证 TLS 和全局变量能够安全获取，除非 server 是全局变量，否则不保证 server 生命周期安全.
     co_await peek_exit();
+
+    // 收到退出信号后，必须等待所有 HTTP 工作线程及其客户端协程结束，
+    // 确保 Run 返回后业务依赖可以安全析构.
     for (auto &thread : m_vecThreads)
     {
         thread.join();
@@ -855,7 +868,6 @@ void HttpServer::setup_signalfd()
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTERM);
     sigaddset(&mask, SIGPIPE);
-    sigprocmask(SIG_BLOCK, &mask, nullptr);
 
     m_iSignalFd = signalfd(-1, &mask, 0);
     if (m_iSignalFd == -1)

@@ -61,7 +61,6 @@ class spin_lock
 
 #define UCOENV uco::__inner__::thread_co_env::GetInstance()
 #define LOCK ((spin_lock *)pLock)
-#define WQ ((__inner__::uco_linked_list *)pWqueue)
 #define PUSH2(Queue)                                                           \
     do                                                                         \
     {                                                                          \
@@ -275,10 +274,10 @@ void umutex::unlock()
     }
 }
 
-#undef WQ
 #define RQ ((__inner__::uco_linked_list *)pRwaiter)
 #define WQ ((__inner__::uco_linked_list *)pWwaiter)
 
+#ifndef USE_NEW_SHARED_MUTEX_IMPL
 ushared_mutex::ushared_mutex() : state(0)
 {
     pRwaiter = new __inner__::uco_linked_list();
@@ -426,6 +425,117 @@ void ushared_mutex::unlock_shared()
     }
     LOCK->unlock();
 }
+#else
+ushared_mutex::ushared_mutex() : readers_(0), reader_wait_(0)
+{
+    reader_sema_ = new usema(0);
+    writer_sema_ = new usema(0);
+}
+
+ushared_mutex::~ushared_mutex()
+{
+    delete (usema *)reader_sema_;
+    reader_sema_ = nullptr;
+    delete (usema *)writer_sema_;
+    writer_sema_ = nullptr;
+}
+
+task<void> ushared_mutex::lock()
+{
+    // 1. 写者间排队 (含饥饿模式, 同 umutex).
+    co_await w_.lock();
+
+    // 2. 挂"写者已登记"牌 (readers_ 转负): 之后到达的读者入 reader_sema
+    //    排队. r = 挂牌瞬间的存量读者数.
+    const int r = readers_.fetch_add(-kMaxReaders);
+    if (r != 0 && reader_wait_.fetch_add(r) != -r)
+    { // 3. 等存量读者清场: 最后一个离开的读者 signal.
+        //    fetch_add(r) != -r: 并发 unlock_shared 先减一拍时计数仍闭合
+        //    (提前清零即无需再等, 见 Go readerWait 同款仲裁).
+        co_await ((usema *)writer_sema_)->wait();
+    }
+}
+
+bool ushared_mutex::try_lock()
+{
+    if (!w_.try_lock())
+    {
+        return false;
+    }
+    // 仅在恰好零读者时原子挂牌: 不产生"短暂负值"窗口
+    // (窗口内到达的读者会错入 reader_sema 队列且无人及时唤醒).
+    int expect = 0;
+    if (!readers_.compare_exchange_strong(expect, -kMaxReaders))
+    {
+        w_.unlock();
+        return false;
+    }
+    return true;
+}
+
+void ushared_mutex::unlock()
+{
+    // 1. 收牌; old < 0, |old + kMaxReaders| = 登记期间排队的读者数.
+    const int old = readers_.fetch_add(kMaxReaders);
+    if (old >= 0)
+    {
+        SYSFTL("sync: unlock of unlocked shared mutex");
+    }
+
+    // 2. 批量放行排队读者 (醒来即持读锁, 新读者此后走快路径).
+    const int queued = old + kMaxReaders;
+    for (int i = 0; i < queued; i++)
+    {
+        ((usema *)reader_sema_)->signal();
+    }
+
+    // 3. 放行下一个写者.
+    w_.unlock();
+}
+
+task<void> ushared_mutex::lock_shared()
+{
+    // 写者已登记 (结果为负): 入 reader_sema 排队, 由 unlock() 放行;
+    // 否则单次原子加即持锁, 不挂起.
+    if (readers_.fetch_add(1) < 0)
+    {
+        co_await ((usema *)reader_sema_)->wait();
+    }
+}
+
+bool ushared_mutex::try_lock_shared()
+{
+    int c = readers_.load();
+    while (c >= 0)
+    {
+        if (readers_.compare_exchange_weak(c, c + 1))
+        {
+            return true;
+        }
+    }
+    return false; // 写者已登记.
+}
+
+void ushared_mutex::unlock_shared()
+{
+    const int old = readers_.fetch_sub(1);
+    if (old > 0)
+    {
+        return; // 无写者: 纯减活跃读者.
+    }
+    if (old == 0)
+    {
+        SYSFTL("sync: unlock_shared of unlocked shared mutex");
+    }
+    // 写者已登记 (old < 0): 存量读者倒计数, 归零者放行写者.
+    // 排队读者的 unlock_shared 必在写者收牌之后 (readers_ 已非负),
+    // 不会误减 reader_wait_.
+    if (reader_wait_.fetch_sub(1) == 1)
+    {
+        ((usema *)writer_sema_)->signal();
+    }
+}
+#endif
 
 #undef RQ
 #undef WQ
@@ -652,19 +762,15 @@ void usema::__kill_broadcast()
 thread_local bool is_do_batching = false;
 
 cobatch::cobatch(int concurrent)
-: concurrent_(concurrent), done_(0), slot_(0)
+: concurrent_(concurrent)
 {
-    slot_ = new uco::usema(std::min(concurrent_, 50));
     done_ = new uco::usema(0);
 }
 
 cobatch::~cobatch()
 {
-    uco::usema* pSlot = (uco::usema*)slot_;
     uco::usema* pDone = (uco::usema*)done_;
-    if (pSlot != nullptr) delete pSlot;
     if (pDone != nullptr) delete pDone;
-    slot_ = nullptr;
     done_ = nullptr;
     concurrent_ = 0;
     tasks_.clear();
@@ -686,33 +792,62 @@ static uco::task<void> run_one(uco::task<void> co, uco::usema* pSlot, uco::usema
     co_return;
 }
 
-uco::task<void> cobatch::run()
+// start go 出的调度协程: 嵌套批次串行执行; 首层占槽提交并等待全部完成.
+// slot/done 为局部信号量: dispatch 收齐 done 前不会析构, run_one 无 UAF
+// (usema::signal 只入队+eventfd 通知, 不做协程内切换).
+static uco::task<void> dispatch(std::vector<task<void>> tasks, int concurrent,
+                                uco::usema* pDone)
 {
     if (is_do_batching)
-    {
-        for (auto&& co : tasks_)
+    { // 嵌套批次: 串行执行, 防打乱外层计数.
+        for (auto&& co : tasks)
         {
             try { co_await co; }
             catch (std::exception& e) {
                 SYSERR("co exception:", e.what());
             }
         }
+        pDone->signal();
         co_return;
     }
+    uco::usema slot(std::min(concurrent, 50)); // 并发槽, 生命周期=批次.
+    uco::usema task_done(0);                   // 任务完成计数.
     is_do_batching = true;
-    int task_count = tasks_.size();
-    for (auto&& co : tasks_) 
+    for (auto&& co : tasks)
     {
-        co_await ((uco::usema*)slot_)->wait();
-        go run_one(co, (uco::usema*)slot_, (uco::usema*)done_);
+        co_await slot.wait();
+        go run_one(co, &slot, &task_done);
     }
-    uco::usema* pDone = (uco::usema*)done_;
-    for (int i = 0; i < task_count; i++)
+    for (size_t i = 0; i < tasks.size(); i++)
     {
-        co_await pDone->wait();
+        co_await task_done.wait();
     }
     is_do_batching = false;
+    pDone->signal();
     co_return;
+}
+
+void cobatch::start()
+{
+    if (tasks_.empty()) return; // 无任务无批次.
+    if (in_flight_) LOGFTL("cobatch::start: previous batch not waited");
+    in_flight_ = true;
+    go dispatch(std::move(tasks_), concurrent_, (uco::usema*)done_);
+    tasks_.clear();
+}
+
+uco::task<void> cobatch::wait()
+{
+    if (!in_flight_) co_return; // 未 start 或已 wait.
+    in_flight_ = false;
+    co_await ((uco::usema*)done_)->wait();
+    co_return;
+}
+
+uco::task<void> cobatch::run()
+{
+    start();
+    co_await wait();
 }
 
 std::mutex uthread_list_mtx;

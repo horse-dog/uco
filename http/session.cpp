@@ -581,7 +581,7 @@ Session *Session::FromContext(HttpContext *ctx)
         // fail-fast (FTL 终止进程), 不以 500 容错掩盖 bug.
         LOGFTL("session: FromContext called with null ctx");
     }
-    Session *s = static_cast<Session *>(ctx->Get(kSessionKey));
+    Session *s = static_cast<Session *>(ctx->Load(kSessionKey));
     if (s == nullptr)
     { // handler 能执行到这里说明链存在, 但 session 从未注册
         // → 中间件不在链上 (路由忘挂 Sessions), 部署错误:
@@ -927,21 +927,11 @@ uco::task<void> SessionStore::MiddlewareImpl(SessionStore *store,
     co_await session->InitLoad();
 
     // 2. 挂到请求上下文 (≈ gin 的 c.Set(DefaultKey, s)),
-    //    handler 经 Session::FromContext(ctx) 取同一指针.
-    ctx->Set(kSessionKey, session.get());
+    //    handler 经 Session::FromContext(ctx) 取同一指针;
+    //    守卫析构自动摘除 (异常路径栈展开亦然), 防 Session 悬垂.
+    auto guard = ctx->Store(kSessionKey, session.get());
 
-    try
-    {
-        co_await ctx->Next();
-    }
-    catch (...)
-    {
-        // Abort()/handler 异常路径: 摘除指针后原样上抛
-        // (由 HttpConnection::Process 统一兜底), 防 Session 悬垂.
-        // 注意: 异常路径不补存会话 (Abort 语义 = 中止).
-        ctx->Set(kSessionKey, nullptr);
-        throw;
-    }
+    co_await ctx->Next();
 
     // 3. 链正常结束: 补存忘保存的脏数据 (C++ 场景默认兜底,
     //    gin 要求手动 Save; 可经 Config::auto_save 关闭以对齐 gin).
@@ -953,8 +943,7 @@ uco::task<void> SessionStore::MiddlewareImpl(SessionStore *store,
         }
     }
 
-    // 4. 摘除; unique_ptr 析构, Session 指针自此失效.
-    ctx->Set(kSessionKey, nullptr);
+    // 4. guard 析构摘除; unique_ptr 析构, Session 指针自此失效.
     co_return;
 }
 

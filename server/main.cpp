@@ -1,6 +1,9 @@
+#include "core/thread_pool.h"
+#include "core/usync.h"
 #include "server/controller/user.h"
 #include "dao/user_mysql.h"
 #include "service/user.h"
+#include "security/password_hasher.h"
 #include "http/csrf.h"
 #include "http/httpserver.h"
 #include "http/ratelimit.h"
@@ -10,12 +13,30 @@
 #include "core/ulog.h"
 #include "demo/demo.pb.h"
 #include <cstdio>
+#include <cstring>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
 #include "core/usql.h"
 #include "core/uredis.h"
 
 using namespace uco;
+
+void BlockServerSignals()
+{
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGTERM);
+    sigaddset(&mask, SIGPIPE);
+
+    const int ret = pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+    if (ret != 0)
+    {
+        SYSFTL("pthread_sigmask:", strerror(ret));
+    }
+}
 
 task<void> echo(HttpContext *context)
 {
@@ -178,9 +199,26 @@ void PrepareDemo(HttpServer& httpserver)
     httpserver.POST("/post", post);
 }
 
+task<void> RunHttpServer(HttpServer& httpserver, uco::uthread_pool& thread_pool)
+{
+    // 1. 启动服务，等待其运行结束 (信号通知).
+    co_await httpserver.Run();
+    // 2. 关闭线程池.
+    co_await thread_pool.close();
+}
+
 task<void> RunHttpServer()
 {
     using namespace webserver;
+    // 7. 定义 Server 实例.
+    HttpServer httpserver(8080, 4, 100, 30);
+
+    // 0. 定义 CPU 线程池.
+    uco::uthread_pool thread_pool(1, 32);
+
+    // 定义密码哈希器.
+    security::BcryptPasswordHasher hasher(thread_pool);
+
     // 1. 创建连接池.
     auto mysql_pool = MakeMySqLPool();
     auto redis_pool = MakeRedisPool();
@@ -189,7 +227,7 @@ task<void> RunHttpServer()
     dao::MySqlUserDao userDAO(mysql_pool);
 
     // 3. 定义 Service 实例 (依赖 DAO).
-    service::UserService userService(userDAO);
+    service::UserService userService(userDAO, hasher);
 
     // 4. 定义 Controller 实例 (依赖 Service).
     controller::UserController userController(userService);
@@ -209,11 +247,7 @@ task<void> RunHttpServer()
     constexpr int kIpRatePerMin = 256; // IP 层限流阈值 (次/分钟).
     constexpr int kNewSessionIpRatePerMin = 30; // 仅新建匿名会话按 IP 计数, 已有会话不限制频率.
 
-    // 7. 定义 Server 实例.
-    HttpServer httpserver(8080, 4, 100, 30);
-
     // 8. 定义业务接口.
-
     PrepareStaticResource(httpserver);
     PrepareForward(httpserver);
     PrepareErrorPage(httpserver);
@@ -272,7 +306,15 @@ task<void> RunHttpServer()
     );
 
     // 9. 阻塞等待服务运行结束.
-    co_await httpserver.Run();
+    // 此方案主线程不会闲置，作为一个CPU工作线程存在.
+    uco::cobatch batchrunner;
+    batchrunner.add(thread_pool.add_current());
+    batchrunner.add(RunHttpServer(httpserver, thread_pool));
+    co_await batchrunner.run();
+
+    // 此方案主线程会闲置.
+    // co_await httpserver.Run();
+    // co_await thread_pool.close();
 }
 
 int main(int argc, const char *argv[])
@@ -285,10 +327,13 @@ int main(int argc, const char *argv[])
         true
     );
 
-    // 2. 进程初始化.
+    // 2. 在创建任何线程前屏蔽服务信号，后续线程继承该信号掩码.
+    BlockServerSignals();
+
+    // 3. 进程初始化.
     uco::InitProcess(false, "ucohttpsvr");
 
-    // 3. 启动服务.
+    // 4. 启动服务.
     go RunHttpServer();
 
     return 0;

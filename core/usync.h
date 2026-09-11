@@ -38,6 +38,9 @@ class umutex
     void *pSema;
 };
 
+#define USE_NEW_SHARED_MUTEX_IMPL
+
+#ifndef USE_NEW_SHARED_MUTEX_IMPL
 class ushared_mutex
 {
   public:
@@ -71,6 +74,54 @@ class ushared_mutex
     void *pLock;
     int state; // -1: write, 0~n: readers count.
 };
+#else
+/**
+ * @brief 协程读写锁 (结构同 Go sync.RWMutex).
+ *
+ * readers_ >= 0 即活跃读者数; 写者经 w_ 排队后减 kMaxReaders 挂牌,
+ * 新读者见负值即在 reader_sema 排队, 存量读者由 reader_wait_ 倒计数,
+ * 归零者唤醒写者. 阻塞/唤醒全部委托 umutex 与 usema (复用其队列与
+ * eventfd 管道, 无自旋锁, 无手写唤醒).
+ *
+ * @note 无竞争读锁为单次原子加 (无挂起); 写者登记后新读者不再插队.
+ */
+class ushared_mutex
+{
+  public:
+    ushared_mutex();
+
+    ~ushared_mutex();
+
+    ushared_mutex(const ushared_mutex &) = delete;
+
+    ushared_mutex &operator=(const ushared_mutex &) = delete;
+
+    ushared_mutex(ushared_mutex &&) = delete;
+
+    ushared_mutex &operator=(ushared_mutex &&) = delete;
+
+    task<void> lock();
+
+    bool try_lock();
+
+    void unlock();
+
+    task<void> lock_shared();
+
+    bool try_lock_shared();
+
+    void unlock_shared();
+
+  private:
+    static constexpr int kMaxReaders = 1 << 30; ///< 写者挂牌偏移 (Go 同款).
+
+    umutex w_;                     ///< 写者间互斥 (含饥饿模式).
+    void *reader_sema_;            ///< 读者排队: 写者登记期间到达.
+    void *writer_sema_;            ///< 写者等存量读者清场.
+    std::atomic<int> readers_;     ///< 活跃读者数; 写者登记后 -= kMaxReaders.
+    std::atomic<int> reader_wait_; ///< 写者登记时的存量读者倒计数.
+};
+#endif
 
 template <class _Mutex>
 class ulock_guard_t
@@ -635,14 +686,36 @@ public:
     cobatch (cobatch&&) = delete;
     cobatch& operator=(cobatch&&) = delete;
 
+    /**
+     * @brief 添加批次任务，临时 task 可安全传入.
+     * @warning 禁止传入立即调用的临时捕获型协程 lambda 返回的 task：其 closure
+     *          会在惰性协程恢复前析构，协程访问捕获项将发生 UAF.
+     * @note 应使用具名协程，或确保协程 lambda 对象存活至批次结束.
+     */
     void add(uco::task<void> task);
 
+    /**
+     * @brief 启动调度.
+     * @note 为确保并发量控制, cobatch 不支持嵌套, 内部嵌套 cobatch 会退化为串行执行.
+     */
+    void start();
+
+    /**
+     * @brief 等待批次完成 (调度协程及其 go 出的全部任务结束).
+     * @note 该接口用于保证 cobatch 启动的所有协程的生命周期, 必须 co_await, 禁止 go.
+     */
+    uco::task<void> wait();
+
+    /**
+     * @brief start & wait.
+     * @note 该接口用于保证 cobatch 启动的所有协程的生命周期, 必须 co_await, 禁止 go.
+     */
     uco::task<void> run();
 
 private:
-    int concurrent_;
-    void* done_;
-    void* slot_;
+    int concurrent_ = 0;
+    bool in_flight_ = false;  ///< 批次在处理中 (已 start 未 wait).
+    void* done_ = 0;          ///< 批次完成信号 (wait 与 dispatch 通信).
     std::vector<task<void>> tasks_;
 
 };

@@ -165,6 +165,21 @@ void HttpResponse::Reset()
     m_httpRspContentBuffer.Reset();
 }
 
+void HttpResponse::ResetContent()
+{
+    m_bShouldGenErrorPage = false;
+    m_bResourceIsTemplate = false;
+    m_pCache.reset();
+    m_mapTemplateArgs.clear();
+    if (m_protoTemplateArgs != nullptr)
+    {
+        delete m_protoTemplateArgs;
+        m_protoTemplateArgs = nullptr;
+    }
+    m_httpRspStaticResourcePath.clear();
+    m_httpRspContentBuffer.Reset();
+}
+
 HttpResponse::~HttpResponse()
 {
     if (m_protoTemplateArgs != nullptr)

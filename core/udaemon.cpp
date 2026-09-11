@@ -63,6 +63,7 @@ ProcessInit::ProcessInit(bool daemonize, const std::string &lock_name)
         {
             printf("[udaemon] open lock file %s failed: %s\n",
                    lock_path.c_str(), strerror(errno));
+            fflush(stdout);
             _exit(1);
         }
 
@@ -70,6 +71,7 @@ ProcessInit::ProcessInit(bool daemonize, const std::string &lock_name)
         {
             printf("[udaemon] another instance is running (lock: %s)\n",
                    lock_path.c_str());
+            fflush(stdout);
             close(lock_fd_);
             lock_fd_ = -1;
             _exit(1);
@@ -89,6 +91,7 @@ ProcessInit::ProcessInit(bool daemonize, const std::string &lock_name)
         if (::daemon(0, 0) < 0)
         {
             printf("[udaemon] daemon() failed: %s\n", strerror(errno));
+            fflush(stdout);
             if (lock_fd_ >= 0)
             {
                 flock(lock_fd_, LOCK_UN);

@@ -228,9 +228,19 @@ thread_co_env::thread_co_env()
     FRAMEWORK_DBG("construct thread_co_env:", thread_id);
     sync_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     uring = new struct io_uring;
-    if (io_uring_queue_init(8192, (struct io_uring*)uring, 0) < 0)
+    int ret = io_uring_queue_init(8192, (struct io_uring*)uring, 0);
+    if (ret < 0)
     {
-        SYSERR("io_uring_queue_init:", strerror(errno));
+        SYSERR("io_uring_queue_init failed, ret: ", ret);
+        fflush(stdout);
+        _exit(1);
+    }
+    // 旧内核无 EXT_ARG: submit_and_wait_timeout 走 SQE 注入路径,
+    // SQ 满载时越界覆盖未提交 SQE (liburing 缺陷), 拒绝启动.
+    if (!(((struct io_uring *)uring)->features & IORING_FEAT_EXT_ARG))
+    {
+        SYSERR("kernel without IORING_FEAT_EXT_ARG not supported");
+        fflush(stdout);
         _exit(1);
     }
 
@@ -244,6 +254,7 @@ thread_co_env::thread_co_env()
     if (!ok)
     {
         SYSERR("context_map try_emplace failed");
+        fflush(stdout);
         _exit(1);
     }
     sync_list = &(it->second.sync_list);
@@ -256,6 +267,7 @@ thread_co_env::thread_co_env()
     {
         errno = EMFILE;
         SYSERR("REGISTER_READ_SYNCFD:", strerror(errno));
+        fflush(stdout);
         _exit(1);
     }
 
@@ -281,11 +293,22 @@ thread_co_env::~thread_co_env()
     if (pTimerTs) delete pTimerTs;
     timer_ts = nullptr;
 
-    struct io_uring* pUring = (struct io_uring*)uring;
-    if (pUring) delete pUring;
+    struct io_uring *pUring = (struct io_uring *)uring;
+    if (pUring)
+    {
+        // 先销毁 ring，取消所有未完成请求，确保内核不再访问其缓冲区.
+        io_uring_queue_exit(pUring);
+        delete pUring;
+    }
     uring = nullptr;
 
-    eventfd_t* pSyncBuffer = (eventfd_t*)sync_buffer;
+    if (sync_fd >= 0)
+    {
+        close(sync_fd);
+        sync_fd = -1;
+    }
+
+    eventfd_t *pSyncBuffer = (eventfd_t *)sync_buffer;
     if (pSyncBuffer) delete pSyncBuffer;
     sync_buffer = nullptr;
 }
@@ -318,26 +341,48 @@ void thread_co_env::schedule()
             }
         }
 
-        // process sync list coroutines.
         while (true)
         {
-            auto co = sync_co_list->pop();
-            if (co == nullptr)
+            bool sync_list_empty = false;
+            // process sqe list coroutines.
+            while (!sqe_co_list->empty())
+            {
+                auto co = sqe_co_list->pop();
+                resume(NODE2ADDR(co));
+                if (flags & FLAG_ACQUIRE_SQE_FAILED)
+                {
+                    break;
+                }
+            }
+
+            // process sync list coroutines.
+            while (true)
+            {
+                auto co = sync_co_list->pop();
+                if (co == nullptr)
+                {
+                    sync_list_empty = true;
+                    break;
+                }
+                if (co->tid != thread_id) [[unlikely]]
+                {
+                    SYSFTL("co->tid and thread_id mismatch", NR(co->tid), NR(thread_id));
+                }
+                resume(NODE2ADDR(co));
+            }
+
+            // process yield coroutines.
+            while (!yield_co_list->empty())
+            {
+                auto co = yield_co_list->pop();
+                resume(NODE2ADDR(co));
+            }
+
+            // 退出条件
+            if (sqe_co_list->empty() && sync_list_empty && yield_co_list->empty())
             {
                 break;
             }
-            if (co->tid != thread_id) [[unlikely]]
-            {
-                SYSFTL("co->tid and thread_id mismatch", NR(co->tid), NR(thread_id));
-            }
-            resume(NODE2ADDR(co));
-        }
-
-        // process yield coroutines.
-        while (!yield_co_list->empty())
-        {
-            auto co = yield_co_list->pop();
-            resume(NODE2ADDR(co));
         }
 
         // 提交队列曾满导致超时请求没交上, 重试.
@@ -356,7 +401,25 @@ void thread_co_env::schedule()
         // process io_uring events.
         if (io_event_count > 0)
         {
-            io_uring_submit_and_wait((struct io_uring*)uring, 1);
+            // 如果 retry_register_read_syncfd = 1，这里可能永久阻塞，需要分别判断
+            // 例如: sync_co_list 已经排空，进入这里时，有个窗口期，
+            // 此时其他线程可能 push 了 sync_co_list，如果 retry_register_read_syncfd = 0，
+            // eventfd 已注册，io_uring_submit_and_wait 必然唤醒，
+            // 但如果 retry_register_read_syncfd = 1, io_uring_submit_and_wait 无法捕获
+            // eventfd 信号，会产生阻塞.
+            // retry_register_read_syncfd，wait 需要设置超时.
+            if (retry_register_read_syncfd == 0) [[likely]]
+            {
+                io_uring_submit_and_wait((struct io_uring*)uring, 1);
+            }
+            else
+            {
+                // 等待且一毫秒超时.
+                struct __kernel_timespec ts = {0, 1000000};
+                struct io_uring_cqe *wc = nullptr;
+                io_uring_submit_and_wait_timeout((struct io_uring *)uring,
+                                                 &wc, 1, &ts, nullptr);
+            }
             struct io_uring_cqe *cqe;
             unsigned head;
             unsigned count = 0;
@@ -388,17 +451,6 @@ void thread_co_env::schedule()
                 resume(ptr);
             }
             io_uring_cq_advance((struct io_uring*)uring, count);
-        }
-
-        // process sqe list coroutines.
-        while (!sqe_co_list->empty())
-        {
-            auto co = sqe_co_list->pop();
-            resume(NODE2ADDR(co));
-            if (flags & FLAG_ACQUIRE_SQE_FAILED)
-            {
-                break;
-            }
         }
     }
 }
@@ -565,7 +617,7 @@ void thread_co_env::timer_refresh()
         {
             auto sqe = get_sqe();
             if (sqe == nullptr)
-            { // 提交队列满: 记下待重试, 由调度循环兜底
+            {   // 提交队列满: 记下待重试, 由调度循环兜底
                 // (旧请求即使睡满自然完成, 处理也是幂等的).
                 timer_arm_pending = true;
                 return;

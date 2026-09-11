@@ -4,8 +4,8 @@
  * @file user.h
  * @brief 用户业务逻辑接口 (service 层): IUserService + UserService.
  *
- * @note service 职责: 密码加密/校验 (bcrypt, 生成与比对在此),
- *       业务规则与错误翻译; 不做存取 (dao), 不做登录态 (session);
+ * @note service 职责: 密码策略、业务规则与错误翻译; 密码哈希/校验委托
+ *       IPasswordHasher; 不做存取 (dao), 不做登录态 (session);
  * @note controller 依赖 IUserService 接口 (引用注入, 生命周期归使用方),
  *       单测可换 mock 实现.
  */
@@ -13,6 +13,7 @@
 #include "core/uco.h"
 #include "server/service/user.pb.h"
 
+#include "server/security/password_hasher.h"
 #include "server/dao/user.h" // dao 层接口 (webserver::dao::IUserDao)
 
 namespace webserver
@@ -57,7 +58,8 @@ class IUserService
 class UserService final : public IUserService
 {
   public:
-    explicit UserService(dao::IUserDao &dao);
+    explicit UserService(dao::IUserDao &dao,
+                         security::IPasswordHasher &hasher);
     ~UserService() override = default;
     UserService(const UserService &) = delete;
     UserService &operator=(const UserService &) = delete;
@@ -84,6 +86,7 @@ class UserService final : public IUserService
 
   private:
     dao::IUserDao &m_dao; ///< dao 接口 (引用: 非空契约, 生命周期归使用方).
+    security::IPasswordHasher &m_hasher; // 密码哈希器.
 };
 
 } // namespace service

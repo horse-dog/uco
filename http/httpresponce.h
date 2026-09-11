@@ -141,6 +141,8 @@ class HttpResponse
     void SetKeepAlive(bool keep_alive) { m_bKeepAlive = keep_alive; }
     bool IsKeepAlive() const { return m_bKeepAlive; }
     void Reset();
+    // 覆盖写响应体前清理 body 相关字段 (保留 headers/RetCode).
+    void ResetContent();
     void GenHttpHeader();
     void ShouldGenErrorPage(int httpRetCode);
     uco::task<bool> GenHtmlTemplate(int fd, int size);

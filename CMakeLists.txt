@@ -7,6 +7,7 @@ add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 find_package(Protobuf REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 set(GENERATED_DIR ${CMAKE_CURRENT_SOURCE_DIR}/gen)
+file(MAKE_DIRECTORY ${GENERATED_DIR}) # gen 不存在时创建 (全新环境直接构建).
 
 option(USE_JEMALLOC "Use jemalloc" OFF)
 
@@ -109,6 +110,9 @@ target_link_libraries(test_log_concurrent PRIVATE ulog)
 
 add_executable(test_ubatch tests/test_ubatch.cpp)
 target_link_libraries(test_ubatch PRIVATE ulog uco uring)
+
+add_executable(test_threadpool tests/test_threadpool.cpp)
+target_link_libraries(test_threadpool PRIVATE ulog uco uring)
 
 add_executable(test_ucond tests/test_ucond.cpp)
 target_link_libraries(test_ucond PRIVATE ulog uco uring)

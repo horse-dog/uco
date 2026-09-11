@@ -1,5 +1,6 @@
 #pragma once
 
+#include <any>
 #include <memory>
 #include <netinet/in.h>
 #include <string>
@@ -221,6 +222,62 @@ class HttpContext
 {
 
   public:
+    /**
+     * @brief Store 返回的 RAII 守卫: 析构时清除对应槽位.
+     * @note  值匹配才清 (键值版 erase 节点 / 单槽版置空), 已被覆盖则不动;
+     *       不得比 ctx 活得久.
+     */
+    class [[nodiscard]] StoreGuard
+    {
+      public:
+        StoreGuard(StoreGuard &&o) noexcept
+            : m_ctx(o.m_ctx), m_key(std::move(o.m_key)), m_val(o.m_val)
+        {
+            o.m_ctx = nullptr;
+        }
+
+        ~StoreGuard() { Release(); }
+
+        StoreGuard(const StoreGuard &) = delete;
+        StoreGuard &operator=(const StoreGuard &) = delete;
+
+      private:
+        friend class HttpContext; // 仅可由 Store 构造.
+
+        StoreGuard(HttpContext *ctx, std::string key, void *val)
+            : m_ctx(ctx), m_key(std::move(key)), m_val(val)
+        {
+        }
+
+        void Release()
+        {
+            if (m_ctx == nullptr)
+            {
+                return;
+            }
+            if (m_key.empty()) // 单槽版
+            {
+                if (m_ctx->m_user_defined_data == m_val)
+                {
+                    m_ctx->m_user_defined_data = nullptr;
+                }
+            }
+            else // 键值版: erase 节点, 不留 nullptr 垃圾.
+            {
+                auto it = m_ctx->m_mapUserData.find(m_key);
+                if (it != m_ctx->m_mapUserData.end() && it->second == m_val)
+                {
+                    m_ctx->m_mapUserData.erase(it);
+                }
+            }
+            m_ctx = nullptr;
+        }
+
+        HttpContext *m_ctx = nullptr;
+        std::string m_key;    // 空 = 单槽版.
+        void *m_val = nullptr;
+    };
+
     HttpContext(class HttpRequest *ptrReq, class HttpResponse *ptrRsp,
                 std::vector<HttpServer::HandleFunc> &handles,
                 std::unordered_map<std::string, std::string> &params,
@@ -308,39 +365,72 @@ class HttpContext
 
     /**
      * @brief 键值版用户数据: 可存多份, 请求链内传递.
-     * @note  值为裸指针, 生命周期归设置方; 同 key 重复 Set 覆盖.
+     * @note  值为裸指针, 生命周期归设置方; 同 key 重复 Store 覆盖;
+     *       返回守卫析构时清除该 key (值不匹配则不动).
      */
-    void Set(const std::string &key, void *value);
+    [[nodiscard]] StoreGuard Store(const std::string &key, void *value);
 
     /** @brief 取键值版用户数据; 未设置返回 nullptr. */
-    void *Get(const std::string &key) const;
+    void *Load(const std::string &key) const;
 
     /**
      * @brief 快速用户数据: 单槽存取, 免键值版 map 查找.
-     * @note  生命周期归设置方; 仅可 Set 一次 (重复 Set fail-fast);
-     *       Get 的 _Tp 须与 Set 一致, 未 Set 即 Get 亦 fail-fast.
+     * @note  生命周期归设置方; 仅可 Store 一次 (重复 Store fail-fast);
+     *       Load 的 _Tp 须与 Store 一致, 未 Store 即 Load 亦 fail-fast;
+     *       返回守卫析构时清空单槽 (值不匹配则不动).
      */
     template <class _Tp>
-    void Set(_Tp& object)
+    [[nodiscard]] StoreGuard Store(_Tp& object)
     {
         if (m_user_defined_data != nullptr)
         {
-            LOGFTL("HttpContext::Set: user data already set");
+            LOGFTL("HttpContext::Store: user data already set");
         }
         m_user_defined_data = std::addressof(object);
+        return StoreGuard(this, std::string(), m_user_defined_data);
     }
 
     /** 
-     * @brief 取快速用户数据; _Tp 须与 Set 一致, 未 Set 则 fail-fast. 
+     * @brief 取快速用户数据; _Tp 须与 Store 一致, 未 Store 则 fail-fast. 
      */
     template <class _Tp>
-    _Tp& Get()
+    _Tp& Load()
     {
         if (m_user_defined_data == nullptr)
         {
-            LOGFTL("HttpContext::Get: user data not set");
+            LOGFTL("HttpContext::Load: user data not set");
         }
         return *static_cast<_Tp *>(m_user_defined_data);
+    }
+
+    /**
+     * @brief any 版用户数据: 值语义 (拷贝/移动入 map), 同 key 重复 Set 覆盖.
+     * @note  字面量按原类型存, 如 Set(k, "x") 存 const char*.
+     */
+    template <class _Tp>
+    void Set(const std::string &key, _Tp &&value)
+    {
+        m_mapAnyUserData.insert_or_assign(key, std::forward<_Tp>(value));
+    }
+
+    /** @brief 取 any 版用户数据; 未设置或 _Tp 与 Set 不符 fail-fast. */
+    template <class _Tp>
+    const _Tp &Get(const std::string &key) const
+    {
+        auto it = m_mapAnyUserData.find(key);
+        if (it == m_mapAnyUserData.end())
+        {
+            LOGFTLF("HttpContext::Get: any key not set: %s", key.c_str());
+        }
+        try
+        {
+            return std::any_cast<const _Tp &>(it->second);
+        }
+        catch (const std::bad_any_cast &)
+        {
+            LOGFTLF("HttpContext::Get: any type mismatch: %s", key.c_str());
+        }
+        return *static_cast<const _Tp *>(nullptr); // 不可达, LOGFTL 已 fatal.
     }
 
     // 设置状态码.
@@ -370,6 +460,7 @@ class HttpContext
     std::unordered_map<std::string, std::string> m_mapQueryParams;
     std::string m_sClientIP; ///< TCP peer IP (限流等中间件的 key).
     std::unordered_map<std::string, void *> m_mapUserData;
+    std::unordered_map<std::string, std::any> m_mapAnyUserData;
     SameSite m_eSameSite = eSameSiteDefault;
 };
 
