@@ -180,7 +180,6 @@ static uco_time_t advance_ts(uco_time_t ts, int64_t ns)
     return ts;
 }
 
-#define TIMEOUT 10
 uco::task<bool> HttpConnection::Read()
 {
     auto &&buf = m_httpRequest.m_buffer;
