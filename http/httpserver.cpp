@@ -9,6 +9,7 @@
 #include <vector>
 #include <netinet/tcp.h>
 
+#include "core/usync.h"
 #include "http/httpconnection.h"
 #include "http/httprequest.h"
 #include "http/httpresponce.h"
@@ -537,9 +538,20 @@ void HttpContext::Abort(const std::string &msg)
 
 HttpServer::HttpServerInstance::~HttpServerInstance()
 {
-    if (m_iListenSock > 0)
+    if (m_iListenSock >= 0)
     {
         close(m_iListenSock);
+        m_iListenSock = -1;
+    }
+    if (m_mtxClientRoutineCount)
+    {
+        delete m_mtxClientRoutineCount;
+        m_mtxClientRoutineCount = nullptr;
+    }
+    if (m_condClientRoutineCount)
+    {
+        delete m_condClientRoutineCount;
+        m_condClientRoutineCount = nullptr;
     }
 }
 
@@ -572,10 +584,12 @@ void HttpServer::HttpServerInstance::Init(HttpServer *manager, int port)
     SYSMSG("listening on port:", port);
 }
 
-void HttpServer::HttpServerInstance::Run()
+uco::task<void> HttpServer::HttpServerInstance::Run()
 {
-    go run();
-    go peek_exit();
+    uco::cobatch batchrunner;
+    batchrunner.add(run());
+    batchrunner.add(peek_exit());
+    co_await batchrunner.run();
 }
 
 int HttpServer::HttpServerInstance::GetRecvTimeout() const
@@ -680,36 +694,47 @@ uco::task<void> HttpServer::HttpServerInstance::run()
         socklen_t client_len = sizeof(client_addr);
         int conn_fd = co_await uaccept(
             m_iListenSock, (struct sockaddr *)&client_addr, &client_len);
-        if (conn_fd > 0)
+        if (m_iRunning == 0)
         {
-            // 注意这里异步启动协程，client_addr 一定要值传递，不能引用传递
-            // 虽然这里引用传递也没问题，因为ServeHttpClient要执行到 conn.Read 才会被切出
-            // 这之前 addr 已经被复制到 conn 了.
-            // 但是这里是因为 ServeHttpClient 的实现特殊才可以.
-            // go 启动协程，都需要传值，否则需要手动保证生命周期（例如用锁，信号量等）.
+            if (conn_fd >= 0)
+            {
+                co_await uclose(conn_fd);
+            }
+            break;
+        }
+        if (conn_fd >= 0)
+        {
             go ServeHttpClient(conn_fd, client_addr);
         }
         else if (conn_fd == -ECANCELED)
         {
-            break;
+            continue;
         }
         else
         {
-            SYSERR("accept:", strerror(errno));
+            SYSERR("accept:", strerror(-conn_fd));
         }
     }
+
+    auto lock = co_await uco::unique_ulock(*m_mtxClientRoutineCount);
+    co_await m_condClientRoutineCount->wait(lock, [this] {
+        return m_iClientRoutineCount == 0;
+    });
 }
 
 uco::task<void>
 HttpServer::HttpServerInstance::ServeHttpClient(int fd, sockaddr_in addr)
 {
     HttpConnection conn(fd, addr, this);
+    {
+        auto lock = co_await uco::unique_ulock(*m_mtxClientRoutineCount);
+        ++m_iClientRoutineCount;
+    }
+
     m_setClientFds.insert(fd);
     while (1)
     {
-        if (!m_setClientFds.contains(fd)) break;
-        bool bRet = false;
-        bRet = co_await conn.Read();
+        bool bRet = co_await conn.Read();
         if (!bRet)
             break;
         bRet = co_await conn.Process();
@@ -719,8 +744,16 @@ HttpServer::HttpServerInstance::ServeHttpClient(int fd, sockaddr_in addr)
         if (!bRet)
             break;
     }
-    co_await conn.CloseConnection();
     m_setClientFds.erase(fd);
+
+    co_await conn.CloseConnection();
+
+    auto lock = co_await uco::unique_ulock(*m_mtxClientRoutineCount);
+    --m_iClientRoutineCount;
+    if (m_iClientRoutineCount == 0)
+    {
+        m_condClientRoutineCount->notify_all();
+    }
 }
 
 uco::task<void> HttpServer::HttpServerInstance::peek_exit()
@@ -729,14 +762,16 @@ uco::task<void> HttpServer::HttpServerInstance::peek_exit()
     m_iRunning = false;
 
     co_await ucancel(m_iListenSock);
-    while (!m_setClientFds.empty())
+
+    if (!m_setClientFds.empty())
     {
-        SYSMSG("cancel", m_setClientFds.size(), "clients");
-        auto clients = m_setClientFds;
-        m_setClientFds.clear();
-        for (int fd : clients)
+        SYSMSG("shutdown", m_setClientFds.size(), "clients");
+    }
+    for (int fd : m_setClientFds)
+    {
+        if (shutdown(fd, SHUT_RDWR) < 0 && errno != ENOTCONN)
         {
-            co_await ucancel(fd);
+            SYSWRN("shutdown client fd:", fd, strerror(errno));
         }
     }
     co_return;
@@ -744,9 +779,10 @@ uco::task<void> HttpServer::HttpServerInstance::peek_exit()
 
 HttpServer::~HttpServer()
 {
-    if (m_iSignalFd > 0)
+    if (m_iSignalFd >= 0)
     {
         close(m_iSignalFd);
+        m_iSignalFd = -1;
     }
 
     for (auto &thread : m_vecThreads)
@@ -792,22 +828,24 @@ uco::task<void> HttpServer::Run()
     // 连接池由使用方 (如 main 的 RunHttpServer) 初始化与关闭,
     // 此处不再重复 Init: 重复 Init 会泄漏旧 reaper 协程,
     // 其定时器常驻调度器导致进程退出时挂死.
-    for (int i = 0; i < m_iNumThreads; i++)
+    for (int i = 1; i < m_iNumThreads; i++)
     {
         m_vecThreads.emplace_back(
             [this, i]
             {
                 this->m_vecWorkers[i].Init(this, m_iPort);
-                this->m_vecWorkers[i].Run();
+                go this->m_vecWorkers[i].Run();
             });
     }
 
     SYSMSG("threads size:", m_vecThreads.size());
 
-    // 不要在主线程中运行 HttpServerInstance.
-    // go 出来的协程依赖 server 的生命周期.
-    // go 出来的协程只保证 TLS 和全局变量能够安全获取，除非 server 是全局变量，否则不保证 server 生命周期安全.
-    co_await peek_exit();
+    uco::cobatch batchrunner;
+    m_vecWorkers[0].Init(this, m_iPort);
+    batchrunner.add(m_vecWorkers[0].run());
+    batchrunner.add(m_vecWorkers[0].peek_exit());
+    batchrunner.add(this->peek_exit());
+    co_await batchrunner.run();
 
     // 收到退出信号后，必须等待所有 HTTP 工作线程及其客户端协程结束，
     // 确保 Run 返回后业务依赖可以安全析构.

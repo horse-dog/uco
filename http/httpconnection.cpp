@@ -334,9 +334,11 @@ uco::task<bool> HttpConnection::Write()
 
 uco::task<void> HttpConnection::CloseConnection()
 {
-    if (m_iSocket > 0)
+    if (m_iSocket >= 0)
     {
-        co_await uclose(m_iSocket);
+        const int fd = m_iSocket;
+        m_iSocket = -1;
+        co_await uclose(fd);
     }
     co_return;
 }

@@ -444,7 +444,7 @@ void HttpResponse::AddHeader(const std::string &key, const std::string &value)
 
 StaticResourcePool::FileCacheI::~FileCacheI()
 {
-    if (first > 0)
+    if (first >= 0)
     {
         LOGDBG("close fd: %d", first);
         go uclose(first);

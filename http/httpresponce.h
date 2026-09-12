@@ -32,7 +32,7 @@ class StaticResourcePool
         int first = -1; // fd.
         int second = 0; // file size.
 
-        bool vaild() const { return first > 0; }
+        bool vaild() const { return first >= 0; }
     };
 
     using FileCache = std::shared_ptr<FileCacheI>;

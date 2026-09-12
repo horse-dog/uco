@@ -211,10 +211,10 @@ task<void> RunHttpServer()
 {
     using namespace webserver;
     // 7. 定义 Server 实例.
-    HttpServer httpserver(8080, 4, 100, 30);
+    HttpServer httpserver(8080, 1, 100, 30);
 
     // 0. 定义 CPU 线程池.
-    uco::uthread_pool thread_pool(1, 32);
+    uco::uthread_pool thread_pool(4, 32);
 
     // 定义密码哈希器.
     security::BcryptPasswordHasher hasher(thread_pool);
@@ -307,14 +307,13 @@ task<void> RunHttpServer()
 
     // 9. 阻塞等待服务运行结束.
     // 此方案主线程不会闲置，作为一个CPU工作线程存在.
-    uco::cobatch batchrunner;
-    batchrunner.add(thread_pool.add_current());
-    batchrunner.add(RunHttpServer(httpserver, thread_pool));
-    co_await batchrunner.run();
+    // uco::cobatch batchrunner;
+    // batchrunner.add(thread_pool.add_current());
+    // batchrunner.add(RunHttpServer(httpserver, thread_pool));
+    // co_await batchrunner.run();
 
-    // 此方案主线程会闲置.
-    // co_await httpserver.Run();
-    // co_await thread_pool.close();
+    co_await httpserver.Run();
+    co_await thread_pool.close();
 }
 
 int main(int argc, const char *argv[])

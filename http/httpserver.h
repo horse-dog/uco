@@ -135,13 +135,18 @@ class HttpServer
     class HttpServerInstance
     {
       public:
-        HttpServerInstance() = default;
+        HttpServerInstance()
+        {
+            m_mtxClientRoutineCount = new uco::umutex();
+            m_condClientRoutineCount = new uco::ucond();
+        }
         ~HttpServerInstance();
 
         void Init(HttpServer *manager, int port);
-        void Run();
+        uco::task<void> Run();
 
       private:
+        friend class HttpServer;
         friend class HttpConnection;
         int GetRecvTimeout() const;
         int GetSendTimeout() const;
@@ -162,6 +167,9 @@ class HttpServer
         int m_iPort = 0;
         int m_iListenSock = -1;
         int m_iRunning = 1;
+        int m_iClientRoutineCount = 0;
+        uco::umutex* m_mtxClientRoutineCount = 0;
+        uco::ucond* m_condClientRoutineCount = 0;
         HttpServer *m_manager = 0;
         std::unordered_set<int> m_setClientFds;
     };
