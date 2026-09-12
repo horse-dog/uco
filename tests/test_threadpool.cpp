@@ -1,4 +1,4 @@
-#include "core/thread_pool.h"
+#include "core/thread_upool.h"
 #include "core/uco.h"
 #include "core/usync.h"
 #include <chrono>
@@ -10,7 +10,7 @@ void ugly_add(int x, int y, int& result)
     result = x + y;
 }
 
-uco::task<void> run_task(uco::uthread_pool& pool)
+uco::task<void> run_task(uco::thread_upool& pool)
 {
     int result = 0;
     int ret = co_await pool.execute(ugly_add, 3, 5, result);
@@ -21,7 +21,7 @@ uco::task<void> run_task(uco::uthread_pool& pool)
 
 uco::task<void> demo()
 {
-    uco::uthread_pool pool(0);
+    uco::thread_upool pool(0);
 
     uco::cobatch batchrunner;
     batchrunner.add(pool.add_current());

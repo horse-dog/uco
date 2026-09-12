@@ -28,7 +28,7 @@ class IPasswordHasher
 class BcryptPasswordHasher final : public IPasswordHasher
 {
   public:
-    explicit BcryptPasswordHasher(uco::uthread_pool &cpu_pool)
+    explicit BcryptPasswordHasher(uco::thread_pool &cpu_pool)
         : m_cpu_pool(cpu_pool)
     {
     }
@@ -43,7 +43,7 @@ class BcryptPasswordHasher final : public IPasswordHasher
     uco::task<int> VerifyDummy(const std::string &plainpassword) override;
 
   private:
-    uco::uthread_pool &m_cpu_pool;
+    uco::thread_pool &m_cpu_pool;
 };
 
 } // namespace security

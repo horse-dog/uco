@@ -1,7 +1,11 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
+#include <exception>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <thread>
 #include <tuple>
@@ -16,7 +20,7 @@
 namespace uco
 {
 // 线程池
-class uthread_pool
+class thread_pool
 {
   public:
     enum RetCode
@@ -33,28 +37,30 @@ class uthread_pool
      * @param thread_num 线程数量
      * @param max_pending 队列积压上限, 超过则拒收新任务 (kBusy)
      */
-    explicit uthread_pool(size_t thread_num, size_t max_pending = 1024)
+    explicit thread_pool(size_t thread_num, size_t max_pending = 1024)
         : m_pool(std::make_shared<Pool>())
     {
         m_num_workers.store(thread_num);
         m_pool->max_pending = max_pending;
+        // if (thread_num == 0)
+        // {
+        //     LOGFTL("thread_pool: thread_num must be > 0");
+        // }
         for (size_t i = 0; i < thread_num; ++i)
         {
-            m_threads.emplace_back([this, pool = m_pool] {
-                go this->Loop(pool);
-            });
+            m_threads.emplace_back(Loop, m_pool);
         }
     }
 
     /**
      * @brief 构造函数
      */
-    uthread_pool() = default;
+    thread_pool() = default;
 
     /**
      * @brief 移动构造函数
      */
-    uthread_pool(uthread_pool &&) = delete;
+    thread_pool(thread_pool &&) = delete;
 
     /**
      * @brief 析构函数: 拒收新任务, 队列中未执行任务丢弃并标 kExit 通知等待方,
@@ -62,29 +68,58 @@ class uthread_pool
      * @note  析构返回 = 在执行任务已结束, 未执行任务已被拒; 不得在任务内析构池
      *       (join 自身死锁), 亦不得在任务中持续投递新任务.
      */
-    ~uthread_pool()
+    ~thread_pool() { close(); }
+
+    /**
+     * @brief 拒收新任务，丢弃队列中未执行任务，等待正在执行的任务结束并
+     *        join 全部工作线程。
+     * @note 可重复或并发调用；不得在线程池任务内调用（会 join 自身）。
+     */
+    void close()
     {
-        if (m_pool && !m_pool->isClosed)
+        std::lock_guard<std::mutex> close_locker(m_closeMtx);
+        if (!m_pool)
         {
-            SYSFTL("POOL not close, use Close() before dtor");
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> locker(m_pool->mtx);
+            if (m_pool->isClosed)
+            {
+                return;
+            }
+            m_pool->isClosed = true;
+        }
+        m_pool->cond.notify_all();
+        for (auto &t : m_threads)
+        {
+            if (t.joinable())
+            {
+                t.join();
+            }
         }
     }
 
-    uco::task<void> close()
+    /**
+     * @brief 异步提交 fn(args...)，不等待任务完成.
+     * @return kOk: 任务已入队; kExit: 线程池已关闭;
+     *         kBusy: 无工作线程或等待队列已满.
+     * @note 参数语义与 std::thread 一致：函数和参数默认 decay-copy/move；
+     *       如需引用传递，调用方必须显式使用 std::ref/std::cref，并保证引用
+     *       对象存活至任务执行结束。任务异步执行时抛出的异常只记录日志，
+     *       无法通过本接口返回 kException.
+     */
+    template <class F, class... Args>
+    int addtask(F &&fn, Args &&...args)
     {
-        if (static_cast<bool>(m_pool))
-        {
-            {
-                auto locker = co_await uco::ulock_guard(m_pool->mtx);
-                m_pool->isClosed = true;
-            }
-            m_pool->cond.notify_all();
-            for (auto &t : m_threads)
-            {
-                if (t.joinable())
-                    t.join();
-            }
-        }
+        auto task =
+            [fn = std::decay_t<F>(std::forward<F>(fn)),
+             args = std::tuple<std::decay_t<Args>...>(
+                 std::forward<Args>(args)...)]() mutable {
+                std::apply(std::move(fn), std::move(args));
+            };
+        return addTask(std::move(task), nullptr, nullptr);
     }
 
     /**
@@ -110,15 +145,16 @@ class uthread_pool
                          store_arg(std::forward<Args>(args))...}]() mutable {
             std::apply(std::move(fn), std::move(args));
         };
-        return executeTask(std::move(task));
-    }
 
-    ///> @brief 添加当前线程为工作线程的一员.
-    ///> @note 需要自行确保 pool 生命周期可用, 例如使用 co_await, 或 cobatch 进行异步.
-    uco::task<void> add_current()
-    {
-        ++m_num_workers;
-        co_await Loop(m_pool);
+        uco::usema sem;
+        int ret_code = RetCode::kOk;
+        int add_ret = addTask(std::move(task), &ret_code, &sem);
+        if (add_ret != RetCode::kOk)
+        {
+            co_return add_ret;
+        }
+        co_await sem.wait();
+        co_return ret_code;
     }
 
   private:
@@ -134,8 +170,8 @@ class uthread_pool
     // 任务池
     struct Pool
     {
-        uco::umutex mtx; // 任务池锁,保证任务队列存取的线程安全
-        uco::ucond cond; // 任务池条件变量, 任务队列空时阻塞线程
+        std::mutex mtx; // 任务池锁,保证任务队列存取的线程安全
+        std::condition_variable cond; // 任务池条件变量, 任务队列空时阻塞线程
         bool isClosed = false;     // 任务池是否关闭
         size_t max_pending = 1024; // 队列积压上限 (背压拒收)
         std::queue<Task> tasks;    // 任务队列
@@ -143,68 +179,49 @@ class uthread_pool
     std::shared_ptr<Pool> m_pool;       // 任务池
     std::vector<std::thread> m_threads; // 工作线程 (析构 join)
     std::atomic<int> m_num_workers = 0;
+    std::mutex m_closeMtx; // 串行化 close, 保证重复/并发调用不会重复 join
 
   private:
-    template <class F> uco::task<int> executeTask(F task)
-    {
-        uco::usema sem;
-        int ret_code = 0;
-        auto ok = co_await addTask(std::move(task), &ret_code, &sem);
-        if (!ok) // 投递被拒, 不同步等待.
-        {
-            co_return ret_code;
-        }
-        co_await sem.wait();
-        co_return ret_code;
-    }
-
     /**
      * @brief 添加一个待执行任务
-     * @param task 待执行任务
-     * @return 投递结果: true = 已入队; false = 被拒 (ret_code 已置 kExit)
+     * @return kOk: 已入队; kExit: 线程池已关闭;
+     *         kBusy: 无工作线程或等待队列已满.
      */
     template <class F>
-    uco::task<bool> addTask(F &&task, int *ret_code, uco::usema *sem)
+    int addTask(F &&task, int *ret_code, uco::usema *sem)
     {
         if (m_num_workers.load() == 0)
         {
             LOGERR("No worker");
-            if (ret_code)
-                *ret_code = RetCode::kBusy;
-            co_return false;
+            return RetCode::kBusy;
         }
         if (!m_pool)
         {
-            LOGERR("uthread_pool not initialized, reject");
-            if (ret_code)
-                *ret_code = RetCode::kExit;
-            co_return false;
+            LOGERR("thread_pool not initialized, reject");
+            return RetCode::kExit;
         }
+
         {
-            auto locker = co_await uco::ulock_guard(m_pool->mtx);
+            std::lock_guard<std::mutex> locker(m_pool->mtx);
             if (m_pool->isClosed)
             {
                 LOGERR("Pool exit, reject");
-                if (ret_code)
-                    *ret_code = RetCode::kExit;
-                co_return false;
+                return RetCode::kExit;
             }
             if (m_pool->tasks.size() >= m_pool->max_pending)
             {
                 SYSERR("Pool overloaded, reject");
-                if (ret_code)
-                    *ret_code = RetCode::kBusy;
-                co_return false;
+                return RetCode::kBusy;
             }
             m_pool->tasks.emplace(ret_code, sem, std::forward<F>(task));
         }
         m_pool->cond.notify_one();
-        co_return true;
+        return RetCode::kOk;
     }
 
-    uco::task<void> Loop(std::shared_ptr<Pool> pool)
+    static void Loop(std::shared_ptr<Pool> pool)
     {
-        auto locker = co_await uco::unique_ulock(pool->mtx);
+        std::unique_lock<std::mutex> locker(pool->mtx);
         while (true)
         {
             if (pool->isClosed)
@@ -223,10 +240,6 @@ class uthread_pool
                     if (task.notify_sema)
                     {
                         task.notify_sema->signal();
-                    }
-                    else
-                    {
-                        SYSERR("Error: no notify sema");
                     }
                 }
 
@@ -259,16 +272,10 @@ class uthread_pool
                 {
                     task.notify_sema->signal();
                 }
-                else
-                {
-                    SYSERR("Error: no notify sema");
-                }
-                co_await locker.lock();
+                locker.lock();
             }
             else
-            {
-                co_await pool->cond.wait(locker);
-            }
+                pool->cond.wait(locker);
         }
     }
 };

@@ -1,5 +1,4 @@
 #include "core/thread_pool.h"
-#include "core/usync.h"
 #include "server/controller/user.h"
 #include "dao/user_mysql.h"
 #include "service/user.h"
@@ -199,22 +198,14 @@ void PrepareDemo(HttpServer& httpserver)
     httpserver.POST("/post", post);
 }
 
-task<void> RunHttpServer(HttpServer& httpserver, uco::uthread_pool& thread_pool)
-{
-    // 1. 启动服务，等待其运行结束 (信号通知).
-    co_await httpserver.Run();
-    // 2. 关闭线程池.
-    co_await thread_pool.close();
-}
-
 task<void> RunHttpServer()
 {
     using namespace webserver;
     // 7. 定义 Server 实例.
-    HttpServer httpserver(8080, 1, 100, 30);
+    HttpServer httpserver(8080, 4, 100, 30);
 
     // 0. 定义 CPU 线程池.
-    uco::uthread_pool thread_pool(4, 32);
+    uco::thread_pool thread_pool(1, 32);
 
     // 定义密码哈希器.
     security::BcryptPasswordHasher hasher(thread_pool);
@@ -306,14 +297,7 @@ task<void> RunHttpServer()
     );
 
     // 9. 阻塞等待服务运行结束.
-    // 此方案主线程不会闲置，作为一个CPU工作线程存在.
-    // uco::cobatch batchrunner;
-    // batchrunner.add(thread_pool.add_current());
-    // batchrunner.add(RunHttpServer(httpserver, thread_pool));
-    // co_await batchrunner.run();
-
     co_await httpserver.Run();
-    co_await thread_pool.close();
 }
 
 int main(int argc, const char *argv[])
