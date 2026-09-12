@@ -86,6 +86,8 @@ session:
   secret_key: "uco-session-secret"
   # Session 和 Cookie 的默认有效期（秒）。
   max_age_sec: 2592000
+  # 新建匿名 CSRF session 的有效期（秒）。
+  anonymous_max_age_sec: 600
   # 浏览器 Cookie 名称。
   cookie_name: "uco_session"
   # Redis 中 默认的闪存键名。
@@ -116,9 +118,3 @@ rate_limit:
   session_per_window: 10
   # 每次调用 ByAccount() 创建的独立中间件按账号的请求上限。
   account_per_window: 10
-
-csrf:
-  # Session 中保存 CSRF token 的键名；签发、校验和登录态刷新必须共用此值。
-  session_key: "csrf"
-  # 新建匿名 CSRF session 的有效期（秒）。
-  anonymous_max_age_sec: 600

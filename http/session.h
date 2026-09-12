@@ -133,6 +133,7 @@ class SessionStore
     std::string m_cookieName;
     std::string m_flashKey;
     int m_maxAge = 86400 * 30;
+    int m_maxAnonymousAge = 600;
     std::string m_cookiePath;
     std::string m_cookieDomain;
     bool m_secure = false;
@@ -201,6 +202,12 @@ class Session
      */
     uco::task<bool> Rotate();
 
+    /// 解析生效的过期秒数 (-1 = 未覆盖, 取 store 默认).
+    int EffectiveMaxAge() const;
+
+    /// 获取 session store 中的匿名会话的过期时间配置.
+    int MaxAnonymousAge() const;
+
   private:
     friend class SessionStore;
 
@@ -209,9 +216,6 @@ class Session
 
     /// 中间件调用: cookie 验签 + Redis 加载.
     uco::task<void> InitLoad();
-
-    /// 解析生效的过期秒数 (-1 = 未覆盖, 取 store 默认).
-    int EffectiveMaxAge() const;
 
     void WriteCookie(int max_age); ///< Set-Cookie (正 age) / 会话 cookie (0).
     void ExpireCookie();           ///< Set-Cookie 立即过期 (Max-Age=0 + Expires).

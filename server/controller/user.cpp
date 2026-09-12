@@ -39,9 +39,8 @@ static constexpr const char *kNoticeCookie = "login_notice";
 /// /welcome 路径, 60 秒, 非 HttpOnly 供 JS 读取, 读后即焚).
 static constexpr const char *kWelcomeNoticeCookie = "welcome_notice";
 
-UserController::UserController(service::IUserService &svc,
-                               std::string csrf_session_key)
-    : m_svc(svc), m_csrfSessionKey(std::move(csrf_session_key))
+UserController::UserController(service::IUserService &svc)
+    : m_svc(svc)
 {
 }
 
@@ -67,7 +66,7 @@ uco::task<bool> UserController::EstablishLoginSession(Session *s, uint64_t vid,
     // (防 session fixation, 纵深防御; 登录态只落新 key).
     s->Set(kKeyVid, std::to_string(vid));
     s->Set(kKeyUsername, username);
-    s->Set(m_csrfSessionKey, csrf::Csrf::NewToken());
+    s->Set(csrf::Csrf::kCsrfKey, csrf::Csrf::NewToken());
     co_return co_await s->Rotate();
 }
 

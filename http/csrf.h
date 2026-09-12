@@ -39,10 +39,8 @@ namespace csrf
 class Csrf
 {
   public:
-    /// 从 csrf.* 读取配置并实体化 (构造时复制所需字段).
-    /// @param config 应用 YAML 配置.
-    explicit Csrf(const uco::YamlConfig &config);
-    ~Csrf();
+    Csrf() = default;
+   ~Csrf();
 
     Csrf(const Csrf &) = delete;
     Csrf &operator=(const Csrf &) = delete;
@@ -62,18 +60,16 @@ class Csrf
      */
     uco::task<void> SessionCheck(HttpContext *ctx);
 
-    /** @brief token 的 session 键名 (签发/校验/登录态刷新共用). */
-    const std::string &SessionKey() const { return m_sessionKey; }
-
     /**
      * @brief 生成随机 CSRF token (32 字节 CSPRNG 的 64 字符 hex).
      * @return 64 字符 hex; CSPRNG 故障时 LOGFTL 并返回空串.
      */
     static std::string NewToken();
 
-  private:
-    std::string m_sessionKey; ///< token 的 session 键名 (csrf.session_key).
-    int m_anonMaxAge = 600;   ///< 新生匿名会话 TTL 秒 (csrf.anonymous_max_age_sec).
+    /**
+     * @brief session 中存储 csrf_token 的 key 名称.
+     */
+    static std::string kCsrfKey;
 };
 
 } // namespace csrf

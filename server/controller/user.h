@@ -33,7 +33,7 @@ namespace controller
 class UserController final
 {
   public:
-    UserController(service::IUserService &svc, std::string csrf_session_key);
+    UserController(service::IUserService &svc);
     ~UserController() = default;
     UserController(const UserController &) = delete;
     UserController &operator=(const UserController &) = delete;
@@ -101,7 +101,6 @@ class UserController final
                                           const std::string &username);
 
     service::IUserService &m_svc; ///< 业务接口 (引用: 非空契约).
-    std::string m_csrfSessionKey; ///< Session 中保存 CSRF token 的配置键名.
 };
 
 } // namespace controller

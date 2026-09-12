@@ -5,7 +5,6 @@
 
 #include "http/csrf.h"
 
-#include "core/uconfig.h"
 #include "core/ulog.h"
 #include "http/session.h"
 
@@ -15,19 +14,7 @@
 namespace csrf
 {
 
-Csrf::Csrf(const uco::YamlConfig &config)
-    : m_sessionKey(config.Get<std::string>("csrf.session_key", "csrf")),
-      m_anonMaxAge(config.Get<int>("csrf.anonymous_max_age_sec", 600))
-{
-    if (m_sessionKey.empty())
-    {
-        m_sessionKey = "csrf";
-    }
-    if (m_anonMaxAge <= 0)
-    {
-        m_anonMaxAge = 600;
-    }
-}
+std::string Csrf::kCsrfKey = "csrf";
 
 Csrf::~Csrf() = default;
 
@@ -38,17 +25,17 @@ uco::task<void> Csrf::SessionIssue(HttpContext *ctx)
 {
     Session *s = Session::FromContext(ctx);
 
-    std::string token = s->Get(m_sessionKey);
+    std::string token = s->Get(Csrf::kCsrfKey);
     if (token.empty())
     { // 首次: 签发并存 session (链尾 auto_save 兜底落盘+下发 cookie).
         token = NewToken();
-        s->Set(m_sessionKey, token);
+        s->Set(Csrf::kCsrfKey, token);
         // 匿名会话 (本请求新生, 仅含 token) 用短 TTL: 无 cookie 洪水
         // 每请求一个 key, 短驻把驻留时间从 30 天压到分钟级; 已存在
         // 会话保持原 TTL; 登录时 Rotate 重置覆盖, 升级会话回默认.
         if (s->IsNew())
         {
-            s->SetMaxAge(m_anonMaxAge);
+            s->SetMaxAge(s->MaxAnonymousAge());
         }
         LOGDBG("csrf: token issued, session:", s->ID());
     }
@@ -66,7 +53,7 @@ uco::task<void> Csrf::SessionIssue(HttpContext *ctx)
 uco::task<void> Csrf::SessionCheck(HttpContext *ctx)
 {
     // 恒时比对 (CRYPTO_memcmp), 与 cookie 验签 (session.cpp) 保持一致.
-    const std::string expected = Session::FromContext(ctx)->Get(m_sessionKey);
+    const std::string expected = Session::FromContext(ctx)->Get(Csrf::kCsrfKey);
     const std::string submitted = ctx->GetHeader("X-CSRF-Token");
     const bool match = expected.size() == submitted.size() &&
                        CRYPTO_memcmp(expected.data(), submitted.data(),

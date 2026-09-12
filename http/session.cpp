@@ -358,6 +358,7 @@ SessionStore::SessionStore(const uco::YamlConfig &config,
           config.Get<std::string>("session.cookie_name", "uco_session")),
       m_flashKey(config.Get<std::string>("session.flash_key", "_flash")),
       m_maxAge(config.Get<int>("session.max_age_sec", 86400 * 30)),
+      m_maxAnonymousAge(config.Get<int>("session.anonymous_max_age_sec", 600)),
       m_cookiePath(config.Get<std::string>("session.cookie_path", "/")),
       m_cookieDomain(config.Get<std::string>("session.cookie_domain", "")),
       m_secure(config.Get<bool>("session.cookie_secure", false)),
@@ -800,6 +801,12 @@ int Session::EffectiveMaxAge() const
 {
     return m_iMaxAgeOverride >= 0 ? m_iMaxAgeOverride : m_ptrStore->m_maxAge;
 }
+
+int Session::MaxAnonymousAge() const
+{
+    return m_ptrStore->m_maxAge;
+}
+
 
 uco::task<bool> Session::Save()
 {

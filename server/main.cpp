@@ -189,7 +189,7 @@ task<void> RunHttpServer(uco::YamlConfig app_config)
     service::UserService userService(userDAO, hasher);
 
     // 7. CSRF 组件.
-    csrf::Csrf csrf(app_config);
+    csrf::Csrf csrf;
 
     // 8. 定义 SessionStore.
     SessionStore store(app_config, redis_pool);
@@ -198,8 +198,7 @@ task<void> RunHttpServer(uco::YamlConfig app_config)
     ratelimit::FixedWindow limiter(app_config);
 
     // 10. 定义 Controller 实例.
-    /// TODO: 这里依赖 csrf.SessionKey(), 感觉不好.
-    controller::UserController userController(userService, csrf.SessionKey());
+    controller::UserController userController(userService);
 
     // 11. 定义业务接口.
     PrepareStaticResource(httpserver);
