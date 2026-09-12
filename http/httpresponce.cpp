@@ -285,15 +285,14 @@ GenErrorPage(int httpRetCode, const std::string &fullpath)
         co_return false;
     }
 
-    using namespace kainjow::mustache;
-    mustache tmpl(buffer);
-
-    data d;
-    d.set("code", std::to_string(httpRetCode));
-    d.set("message", httpRetCode2StatusString[httpRetCode]);
     m_httpRspContentBuffer.Reset();
     std::string result;
     ret = co_await m_httprenderpool.execute([&] {
+        using namespace kainjow::mustache;
+        mustache tmpl(buffer);
+        data d;
+        d.set("code", std::to_string(httpRetCode));
+        d.set("message", httpRetCode2StatusString[httpRetCode]);
         result = tmpl.render(d);
     });
     if (ret != 0)
@@ -401,22 +400,22 @@ uco::task<bool> HttpResponse::GenHtmlTemplate(int fd, int size)
         co_return false;
     }
 
-    kainjow::mustache::mustache tmpl(buffer);
-    kainjow::mustache::data d;
-    if (m_protoTemplateArgs != nullptr)
-    {
-        d = protoToData(*m_protoTemplateArgs);
-    }
-    else
-    {
-        for (auto &&[k, v] : m_mapTemplateArgs)
-        {
-            d.set(k, v);
-        }
-    }
-    m_httpRspContentBuffer.Reset();
     std::string result;
     ret = co_await m_httprenderpool.execute([&] {
+        kainjow::mustache::mustache tmpl(buffer);
+        kainjow::mustache::data d;
+        if (m_protoTemplateArgs != nullptr)
+        {
+            d = protoToData(*m_protoTemplateArgs);
+        }
+        else
+        {
+            for (auto &&[k, v] : m_mapTemplateArgs)
+            {
+                d.set(k, v);
+            }
+        }
+        m_httpRspContentBuffer.Reset();
         result = tmpl.render(d);
     });
     if (ret != 0)
