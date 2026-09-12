@@ -12,8 +12,6 @@
 #include "core/ulog.h"
 #include "demo/demo.pb.h"
 #include <cstdio>
-#include <cstring>
-#include <pthread.h>
 #include <signal.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -21,21 +19,6 @@
 #include "core/uredis.h"
 
 using namespace uco;
-
-void BlockServerSignals()
-{
-    sigset_t mask;
-    sigemptyset(&mask);
-    sigaddset(&mask, SIGINT);
-    sigaddset(&mask, SIGTERM);
-    sigaddset(&mask, SIGPIPE);
-
-    const int ret = pthread_sigmask(SIG_BLOCK, &mask, nullptr);
-    if (ret != 0)
-    {
-        SYSFTL("pthread_sigmask:", strerror(ret));
-    }
-}
 
 task<void> echo(HttpContext *context)
 {
@@ -310,11 +293,8 @@ int main(int argc, const char *argv[])
         true
     );
 
-    // 2. 在创建任何线程前屏蔽服务信号，后续线程继承该信号掩码.
-    BlockServerSignals();
-
-    // 3. 进程初始化.
-    uco::InitProcess(false, "ucohttpsvr");
+    // 2. 进程初始化，并在创建任何线程前屏蔽服务信号；后续线程继承掩码.
+    uco::InitProcess(false, "ucohttpsvr", {SIGINT, SIGTERM, SIGPIPE});
 
     // 4. 启动服务.
     go RunHttpServer();

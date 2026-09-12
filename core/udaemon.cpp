@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/file.h>
 #include <unistd.h>
 
@@ -114,8 +116,32 @@ ProcessInit::~ProcessInit()
     }
 }
 
-void InitProcess(bool bDaemonize, const std::string &lock_name)
+void InitProcess(bool bDaemonize, const std::string &lock_name,
+                 const std::vector<int> &blocked_signals)
 {
+    if (!blocked_signals.empty())
+    {
+        sigset_t mask;
+        sigemptyset(&mask);
+        for (int signo : blocked_signals)
+        {
+            if (sigaddset(&mask, signo) != 0)
+            {
+                printf("[udaemon] invalid signal: %d\n", signo);
+                fflush(stdout);
+                _exit(1);
+            }
+        }
+
+        const int ret = pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+        if (ret != 0)
+        {
+            printf("[udaemon] pthread_sigmask failed: %s\n", strerror(ret));
+            fflush(stdout);
+            _exit(1);
+        }
+    }
+
     (void)ProcessInit::GetInstance(bDaemonize, lock_name);
 }
 

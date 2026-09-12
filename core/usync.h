@@ -2,7 +2,9 @@
 #include "uco.h"
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -690,9 +692,24 @@ public:
      * @brief 添加批次任务，临时 task 可安全传入.
      * @warning 禁止传入立即调用的临时捕获型协程 lambda 返回的 task：其 closure
      *          会在惰性协程恢复前析构，协程访问捕获项将发生 UAF.
-     * @note 应使用具名协程，或确保协程 lambda 对象存活至批次结束.
+     * @note 捕获型协程 lambda 请直接传 callable，不要在末尾添加 ().
      */
     void add(uco::task<void> task);
+
+    /**
+     * @brief 添加返回 task<void> 的 callable，并持有 callable 到任务执行结束.
+     * @note 支持临时捕获型及 move-only 协程 lambda；捕获的引用对象仍须存活至
+     *       run()/wait() 完成。调用形式为 add(lambda)，而非 add(lambda()).
+     */
+    template <class F>
+        requires (!std::same_as<std::decay_t<F>, uco::task<void>> &&
+                  std::invocable<std::decay_t<F> &> &&
+                  std::same_as<std::invoke_result_t<std::decay_t<F> &>,
+                               uco::task<void>>)
+    void add(F &&fn)
+    {
+        add(run_callable(std::decay_t<F>(std::forward<F>(fn))));
+    }
 
     /**
      * @brief 启动调度.
@@ -713,6 +730,13 @@ public:
     uco::task<void> run();
 
 private:
+    template <class F>
+    static uco::task<void> run_callable(F fn)
+    {
+        co_await std::invoke(fn);
+        co_return;
+    }
+
     int concurrent_ = 0;
     bool in_flight_ = false;  ///< 批次在处理中 (已 start 未 wait).
     void* done_ = 0;          ///< 批次完成信号 (wait 与 dispatch 通信).

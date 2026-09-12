@@ -39,6 +39,21 @@ task<void> demo1()
     }
     co_await batchrunner.run();
 
+
+    int ref_value = 41;
+    bool lambda_ran = false;
+    batchrunner.add([&]() -> uco::task<void> {
+        co_await uco_nanosleep(0, 1000000);
+        ++ref_value;
+        lambda_ran = true;
+        co_return;
+    });
+    co_await batchrunner.run();
+    if (!lambda_ran || ref_value != 42)
+    {
+        LOGFTL("temporary coroutine lambda lifetime test failed");
+    }
+
     LOGMSG("finish");
     co_await demo();
 }
