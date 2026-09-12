@@ -32,14 +32,32 @@ task<void> echo(HttpContext *context)
 task<void> middleware1(HttpContext *context)
 {
     LOGDBG("before");
+    demo::User usr;
+    usr.set_username("joker");
+    usr.set_age(100);
+
+    // key store.
+    auto guard = context->Store("user", &usr);
     co_await context->Next();
     LOGDBG("after");
+    demo::Address& addr = context->Get<demo::Address>("addr");
+    LOGDBG(NR(addr));
     co_return;
 }
 
 task<void> middleware2(HttpContext *context)
 {
     LOGDBG("before");
+    demo::User* usr = (demo::User*)context->Load("user");
+    if (usr) LOGDBG(NR(*usr));
+
+    demo::Address addr;
+    addr.set_city("New York");
+    addr.set_street("Wall Street");
+
+    // key set.
+    context->Set("addr", addr);
+
     co_await context->Next();
     LOGDBG("after");
     co_return;
@@ -48,6 +66,9 @@ task<void> middleware2(HttpContext *context)
 task<void> middleware3(HttpContext *context)
 {
     LOGDBG("before");
+    demo::Address& addr = context->Get<demo::Address>("addr");
+    LOGDBG(NR(addr));
+    addr.set_street("null");
     LOGDBG("after");
     co_return;
 }

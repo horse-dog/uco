@@ -78,8 +78,11 @@ static void fill_error(SqlError &e, MYSQL *mysql, int r, const char *op,
     e.ret_code = -(int)mysql_errno(mysql); // MySQL 原码取负 (见 UsqlError).
     e.err_msg = mysql_error(mysql);
     e.sqlstate = mysql_sqlstate(mysql);
-    SYSERR("usql:", op, "failed, errno:", e.ret_code, "msg:", e.err_msg,
+    if (e.ret_code != usql::kDuplicateEntry)
+    {
+        SYSERR("usql:", op, "failed, errno:", e.ret_code, "msg:", e.err_msg,
            "sqlstate:", e.sqlstate, "elapsed_ms:", elapsed);
+    }
 }
 
 bool SqlError::Retryable() const
@@ -207,9 +210,13 @@ static uco::task<int> await_call(MYSQL *mysql, const char *op,
         }
         if (status == NET_ASYNC_ERROR)
         {
-            SYSERR("usql:", op, "async error, fd:", get_mysql_fd(mysql),
+            auto err_no = mysql_errno(mysql);
+            if (err_no != -usql::kDuplicateEntry)
+            {
+                SYSERR("usql:", op, "async error, fd:", get_mysql_fd(mysql),
                    "errno:", mysql_errno(mysql),
                    "msg:", mysql_error(mysql));
+            }
             co_return -EIO;
         }
 

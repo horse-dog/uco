@@ -1,7 +1,6 @@
 #pragma once
 
 #include <any>
-#include <memory>
 #include <netinet/in.h>
 #include <string>
 #include <sys/eventfd.h>
@@ -287,14 +286,7 @@ class HttpContext
             {
                 return;
             }
-            if (m_key.empty()) // 单槽版
-            {
-                if (m_ctx->m_user_defined_data == m_val)
-                {
-                    m_ctx->m_user_defined_data = nullptr;
-                }
-            }
-            else // 键值版: erase 节点, 不留 nullptr 垃圾.
+
             {
                 auto it = m_ctx->m_mapUserData.find(m_key);
                 if (it != m_ctx->m_mapUserData.end() && it->second == m_val)
@@ -406,36 +398,6 @@ class HttpContext
     void *Load(const std::string &key) const;
 
     /**
-     * @brief 快速用户数据: 单槽存取, 免键值版 map 查找.
-     * @note  生命周期归设置方; 仅可 Store 一次 (重复 Store fail-fast);
-     *       Load 的 _Tp 须与 Store 一致, 未 Store 即 Load 亦 fail-fast;
-     *       返回守卫析构时清空单槽 (值不匹配则不动).
-     */
-    template <class _Tp>
-    [[nodiscard]] StoreGuard Store(_Tp& object)
-    {
-        if (m_user_defined_data != nullptr)
-        {
-            LOGFTL("HttpContext::Store: user data already set");
-        }
-        m_user_defined_data = std::addressof(object);
-        return StoreGuard(this, std::string(), m_user_defined_data);
-    }
-
-    /** 
-     * @brief 取快速用户数据; _Tp 须与 Store 一致, 未 Store 则 fail-fast. 
-     */
-    template <class _Tp>
-    _Tp& Load()
-    {
-        if (m_user_defined_data == nullptr)
-        {
-            LOGFTL("HttpContext::Load: user data not set");
-        }
-        return *static_cast<_Tp *>(m_user_defined_data);
-    }
-
-    /**
      * @brief any 版用户数据: 值语义 (拷贝/移动入 map), 同 key 重复 Set 覆盖.
      * @note  字面量按原类型存, 如 Set(k, "x") 存 const char*.
      */
@@ -447,22 +409,26 @@ class HttpContext
 
     /** @brief 取 any 版用户数据; 未设置或 _Tp 与 Set 不符 fail-fast. */
     template <class _Tp>
-    const _Tp &Get(const std::string &key) const
+    _Tp &Get(const std::string &key)
     {
         auto it = m_mapAnyUserData.find(key);
         if (it == m_mapAnyUserData.end())
         {
-            LOGFTLF("HttpContext::Get: any key not set: %s", key.c_str());
+            std::string msg = std::string("HttpContext::Get: any key not set: ") + key.c_str();
+            LOGERR(msg);
+            Abort(msg);
         }
         try
         {
-            return std::any_cast<const _Tp &>(it->second);
+            return std::any_cast<_Tp &>(it->second);
         }
         catch (const std::bad_any_cast &)
         {
-            LOGFTLF("HttpContext::Get: any type mismatch: %s", key.c_str());
+            std::string msg = std::string("HttpContext::Get: any type mismatch: ") + key.c_str();
+            LOGERR(msg);
+            Abort(msg);
         }
-        return *static_cast<const _Tp *>(nullptr); // 不可达, LOGFTL 已 fatal.
+        return *static_cast<_Tp *>(nullptr); // 不可达, LOGFTL 已 fatal.
     }
 
     // 设置状态码.
@@ -514,7 +480,6 @@ class HttpContext
   private:
     class HttpRequest *m_ptrReq = 0;
     class HttpResponse *m_ptrRsp = 0;
-    void *m_user_defined_data = 0;
     size_t m_iCurHandleIndex = -1;
     bool m_bHasSetRspContent = false;
     bool m_bLog = true; // 获取静态资源等操作无需日志, 以免刷屏.
