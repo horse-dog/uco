@@ -41,9 +41,7 @@ std::string ExtractFormField(std::string_view body, std::string_view name)
     return "";
 }
 
-} // namespace
-
-struct FixedWindow::Impl
+struct FixedWindowDetail
 {
     enum class KeyBy
     {
@@ -52,6 +50,27 @@ struct FixedWindow::Impl
         Session,
         Account,
     };
+
+    static const char* KeyByToStr(KeyBy keyby)
+    {
+        switch (keyby) {
+        case KeyBy::IP:
+            return "ip";
+            break;
+        case KeyBy::NewSessionIP:
+            return "new session ip";
+            break;
+        case KeyBy::Session:
+            return "session";
+            break;
+        case KeyBy::Account:
+            return "account";
+            break;
+        default:
+            break;
+        }
+        return "";
+    }
 
     struct Entry
     {
@@ -122,8 +141,6 @@ struct FixedWindow::Impl
         std::unordered_map<std::string, Entry> m_entries;
     };
 
-    explicit Impl(const uco::YamlConfig &source) : config(source) {}
-
     static std::string ExtractKey(KeyBy key_by, HttpContext *ctx)
     {
         switch (key_by)
@@ -154,14 +171,15 @@ struct FixedWindow::Impl
                 ctx->SetHeader("Retry-After", std::to_string(retry_sec));
                 ctx->Data(429, "application/json",
                           "{\"code\":429,\"msg\":\"too many requests\"}");
-                ctx->Abort();
+                ctx->Abort(std::string("too many requests: ") + KeyByToStr(key_by));
             }
         }
         co_await ctx->Next();
     }
 
-    HttpServer::HandleFunc Make(const std::string &limit_name,
-                                int default_limit, KeyBy key_by) const
+    static HttpServer::HandleFunc Make(const uco::YamlConfig &config,
+                                       const std::string &limit_name,
+                                       int default_limit, KeyBy key_by)
     {
         const int window_sec =
             config.Get<int>("rate_limit.window_sec", 60);
@@ -172,36 +190,34 @@ struct FixedWindow::Impl
             co_await Handle(counter, key_by, ctx);
         };
     }
-
-    uco::YamlConfig config;
 };
 
-FixedWindow::FixedWindow(const uco::YamlConfig &config)
-    : m_impl(std::make_unique<Impl>(config))
+} // namespace
+
+FixedWindow::FixedWindow(const uco::YamlConfig &config) : m_config(config) {}
+
+HttpServer::HandleFunc FixedWindow::ByIP()
 {
+    return FixedWindowDetail::Make(m_config, "ip_per_window", 256,
+                                   FixedWindowDetail::KeyBy::IP);
 }
 
-FixedWindow::~FixedWindow() = default;
-
-HttpServer::HandleFunc FixedWindow::ByIP(HttpContext *ctx)
+HttpServer::HandleFunc FixedWindow::ByNewSessionIP()
 {
-    return m_impl->Make("ip_per_window", 256, Impl::KeyBy::IP);
+    return FixedWindowDetail::Make(m_config, "new_session_ip_per_window", 30,
+                                   FixedWindowDetail::KeyBy::NewSessionIP);
 }
 
-HttpServer::HandleFunc FixedWindow::ByNewSessionIP(HttpContext *ctx)
+HttpServer::HandleFunc FixedWindow::BySession()
 {
-    return m_impl->Make("new_session_ip_per_window", 30,
-                        Impl::KeyBy::NewSessionIP);
+    return FixedWindowDetail::Make(m_config, "session_per_window", 10,
+                                   FixedWindowDetail::KeyBy::Session);
 }
 
-HttpServer::HandleFunc FixedWindow::BySession(HttpContext *ctx)
+HttpServer::HandleFunc FixedWindow::ByAccount()
 {
-    return m_impl->Make("session_per_window", 10, Impl::KeyBy::Session);
-}
-
-HttpServer::HandleFunc FixedWindow::ByAccount(HttpContext *ctx)
-{
-    return m_impl->Make("account_per_window", 10, Impl::KeyBy::Account);
+    return FixedWindowDetail::Make(m_config, "account_per_window", 10,
+                                   FixedWindowDetail::KeyBy::Account);
 }
 
 } // namespace ratelimit

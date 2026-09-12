@@ -11,6 +11,7 @@
 #include <concepts>
 #include <functional>
 #include <map>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -479,6 +480,37 @@ class HttpContext
     // 关闭 CGI 打印请求信息日志.
     void DisableLog() { m_bLog = false; }
 
+
+    /** @brief 绑定成员协程，或在注册时调用无参 handler 工厂。 */
+    template <typename...>
+    inline static constexpr bool kInvalidHandlerMethod = false;
+
+    template <typename T, typename Method>
+    static HttpServer::HandleFunc MakeHandlerImpl(T &obj, Method method)
+    {
+        // 成员协程：每次请求传入当前 ctx 调用。
+        if constexpr (std::is_invocable_r_v<uco::task<void>, Method, T *,
+                                            HttpContext *>)
+        {
+            return [ptr = &obj, method](HttpContext *ctx) -> uco::task<void>
+            {
+                co_return co_await std::invoke(method, ptr, ctx);
+            };
+        }
+        // 无参工厂：注册时调用一次，复用其返回的 handler。
+        else if constexpr (
+            std::is_invocable_r_v<HttpServer::HandleFunc, Method, T *>)
+        {
+            return std::invoke(method, &obj);
+        }
+        else
+        {
+            static_assert(kInvalidHandlerMethod<Method>,
+                          "MakeHandler requires task<void>(HttpContext*) or "
+                          "HandleFunc()");
+        }
+    }
+
   private:
     class HttpRequest *m_ptrReq = 0;
     class HttpResponse *m_ptrRsp = 0;
@@ -495,28 +527,8 @@ class HttpContext
     SameSite m_eSameSite = eSameSiteDefault;
 };
 
-#define MakeHandler(obj, method)                                              \
-    [ptr = &obj, m = &std::decay_t<decltype(obj)>::method]                    \
-        (HttpContext *ctx) -> uco::task<void>                                 \
-    {                                                                         \
-        co_return co_await [](auto *p, auto mm, HttpContext *c)               \
-            -> uco::task<void>                                                \
-        {                                                                     \
-            if constexpr (std::is_same_v<decltype((p->*mm)(c)),               \
-                                         uco::task<void>>)                    \
-            {                                                                 \
-                co_return co_await (p->*mm)(c);                               \
-            }                                                                 \
-            else                                                              \
-            {                                                                 \
-                co_return co_await (p->*mm)(c)(c);                            \
-            }                                                                 \
-        }(ptr, m, ctx);                                                       \
-    }
-
-// #define MakeHandler(obj, method)                                              \
-//     [ptr = &obj, m = &std::decay_t<decltype(obj)>::method]                    \
-//         (HttpContext *ctx) -> uco::task<void>                                 \
-//     {                                                                         \
-//         co_return co_await (ptr->*m)(ctx);                                    \
-//     }
+#define MakeHandler(obj, method)                    \
+    HttpContext::MakeHandlerImpl(                   \
+      (obj),                                        \
+      &std::remove_cvref_t<decltype((obj))>::method \
+    ) 

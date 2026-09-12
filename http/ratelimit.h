@@ -16,22 +16,16 @@
  * @code
  *   ratelimit::FixedWindow limiter(config);
  *   httpserver.POST("/login",
- *       limiter.ByIP(),
+ *       MakeHandler(limiter, ByIP),
  *       MakeHandler(store, Sessions),
  *       MakeHandler(csrf, SessionCheck),
- *       limiter.ByAccount(),
+ *       MakeHandler(limiter, ByAccount),
  *       MakeHandler(controller, Login));
  * @endcode
  */
 
+#include "core/uconfig.h"
 #include "http/httpserver.h"
-
-#include <memory>
-
-namespace uco
-{
-class YamlConfig;
-}
 
 namespace ratelimit
 {
@@ -42,10 +36,29 @@ class Limiter
   public:
     virtual ~Limiter() = default;
 
-    virtual HttpServer::HandleFunc ByIP(HttpContext *ctx) = 0;
-    virtual HttpServer::HandleFunc ByNewSessionIP(HttpContext *ctx) = 0;
-    virtual HttpServer::HandleFunc BySession(HttpContext *ctx) = 0;
-    virtual HttpServer::HandleFunc ByAccount(HttpContext *ctx) = 0;
+    /**
+     * @brief 创建按客户端 IP 计数的限流处理函数。
+     * @return 独占当前路由挂载点计数器的处理函数。
+     */
+    virtual HttpServer::HandleFunc ByIP() = 0;
+
+    /**
+     * @brief 创建仅对新匿名会话按客户端 IP 计数的限流处理函数。
+     * @return 独占当前路由挂载点计数器的处理函数。
+     */
+    virtual HttpServer::HandleFunc ByNewSessionIP() = 0;
+
+    /**
+     * @brief 创建按 Session ID 计数的限流处理函数。
+     * @return 独占当前路由挂载点计数器的处理函数。
+     */
+    virtual HttpServer::HandleFunc BySession() = 0;
+
+    /**
+     * @brief 创建按登录表单账号计数的限流处理函数。
+     * @return 独占当前路由挂载点计数器的处理函数。
+     */
+    virtual HttpServer::HandleFunc ByAccount() = 0;
 };
 
 /**
@@ -58,21 +71,27 @@ class FixedWindow final : public Limiter
 {
   public:
     explicit FixedWindow(const uco::YamlConfig &config);
-    ~FixedWindow() override;
+    ~FixedWindow() override = default;
 
     FixedWindow(const FixedWindow &) = delete;
     FixedWindow &operator=(const FixedWindow &) = delete;
     FixedWindow(FixedWindow &&) = delete;
     FixedWindow &operator=(FixedWindow &&) = delete;
 
-    HttpServer::HandleFunc ByIP(HttpContext *ctx) override;
-    HttpServer::HandleFunc ByNewSessionIP(HttpContext *ctx) override;
-    HttpServer::HandleFunc BySession(HttpContext *ctx) override;
-    HttpServer::HandleFunc ByAccount(HttpContext *ctx) override;
+    /** @copydoc Limiter::ByIP */
+    HttpServer::HandleFunc ByIP() override;
+
+    /** @copydoc Limiter::ByNewSessionIP */
+    HttpServer::HandleFunc ByNewSessionIP() override;
+
+    /** @copydoc Limiter::BySession */
+    HttpServer::HandleFunc BySession() override;
+
+    /** @copydoc Limiter::ByAccount */
+    HttpServer::HandleFunc ByAccount() override;
 
   private:
-    struct Impl;
-    std::unique_ptr<Impl> m_impl;
+    uco::YamlConfig m_config;
 };
 
 } // namespace ratelimit

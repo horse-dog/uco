@@ -533,7 +533,7 @@ void *HttpContext::Load(const std::string &key) const
 void HttpContext::Abort(const std::string &msg)
 {
     if (!msg.empty())
-        LOGMSG("Abort: ", msg);
+        LOGMSG("Abort:", msg);
     else
         LOGMSG("Abort");
     throw HttpException(msg);
