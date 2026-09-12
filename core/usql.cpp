@@ -1,5 +1,6 @@
 #define _UCO_THREAD_ENV_IMPL
 #include "core/usql.h"
+#include "core/uconfig.h"
 #include "core/ulog.h"
 
 #include <google/protobuf/descriptor.h>
@@ -842,24 +843,27 @@ uco::task<TxnResult> utransaction(MYSQL *mysql, std::vector<std::string> sqls,
 
 // ==================== 连接池 ====================
 
-upool::upool(const config &cfg)
+upool::upool(const uco::YamlConfig &config)
 {
-    Init(cfg);
+    const size_t max_size = config.Get<size_t>("mysql.max_size", 16);
+    st_ = std::make_shared<state>(max_size == 0 ? 1 : max_size);
+    st_->host = config.Get<std::string>("mysql.host", "127.0.0.1");
+    st_->user = config.Get<std::string>("mysql.user", "root");
+    st_->pass = config.Get<std::string>("mysql.password", "123456");
+    st_->db = config.Get<std::string>("mysql.database", "webserver");
+    st_->port = config.Get<unsigned int>("mysql.port", 3306);
+    st_->min_idle = config.Get<size_t>("mysql.min_idle", 1);
+    st_->reap_interval_sec =
+        config.Get<uint64_t>("mysql.reap_interval_sec", 60);
+    st_->use_ssl = config.Get<bool>("mysql.use_ssl", false);
+    st_->ts.tv_sec = config.Get<time_t>("mysql.connect_timeout_sec", 10);
+    st_->ts.tv_nsec = 0;
+    go reaper(st_);
 }
 
 upool::~upool() { Close(); }
 
-void upool::Init(const config &cfg)
-{
-    st_ = std::make_shared<state>(cfg, cfg.max_size ? cfg.max_size : 1);
-    if (st_->cfg.max_size == 0)
-    {
-        st_->cfg.max_size = 1;
-    }
-    go reaper(st_);
-}
-
-/// 后台缩容协程: 每 reap_interval_ms 关闭一个 idle, 保底 min_idle.
+/// 后台缩容协程: 每 reap_interval_sec 秒关闭一个 idle, 保底 min_idle.
 /// 睡在可取消定时器上, close() 经 waker.wake() 立即唤醒 (微秒级),
 /// 无需轮询 closed 标志, 不拖垮调度器收尾.
 /// 帧内持有 state 的 shared_ptr, 池析构后仍可安全访问并自行退出.
@@ -868,7 +872,7 @@ uco::task<void> upool::reaper(std::shared_ptr<state> st)
     while (true)
     {
         co_await st->waker.sleep_for(
-            std::chrono::milliseconds(st->cfg.reap_interval_ms));
+            std::chrono::seconds(st->reap_interval_sec));
         if (st->closed)
         {
             MYSQL_DBG("reaper exit");
@@ -878,7 +882,7 @@ uco::task<void> upool::reaper(std::shared_ptr<state> st)
         MYSQL *victim = nullptr;
         {
             std::lock_guard<std::mutex> guard(st->mtx);
-            if (!st->closed && st->idle.size() > st->cfg.min_idle)
+            if (!st->closed && st->idle.size() > st->min_idle)
             {
                 victim = st->idle.front();
                 st->idle.pop_front();
@@ -920,9 +924,9 @@ uco::task<MYSQL *> upool::Acquire()
 
     // 新建连接 (不持锁).
     MYSQL_DBG("usql: pool acquire: no idle, creating");
-    m = co_await uconnect(st->cfg.host.c_str(), st->cfg.user.c_str(),
-                          st->cfg.pass.c_str(), st->cfg.db.c_str(),
-                          st->cfg.port, st->cfg.ts, st->cfg.use_ssl);
+    m = co_await uconnect(st->host.c_str(), st->user.c_str(),
+                          st->pass.c_str(), st->db.c_str(), st->port, st->ts,
+                          st->use_ssl);
     if (m == nullptr)
     {
         SYSERR("usql: pool acquire: create failed");

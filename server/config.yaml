@@ -1,0 +1,124 @@
+# UCO 示例 HTTP 服务配置。所有时间字段均明确标注单位。
+
+# 服务模块名，同时用于日志标识和单实例进程锁名称；空字符串表示不创建进程锁。
+module_name: "ucohttpsvr"
+
+logging:
+  # 最低日志级别：0=DEBUG，1=INFO，2=WARN，3=ERROR，4=FATAL。
+  level: 1
+  # 日志输出方式：0=CONSOLE，1=FILE。
+  mode: 0
+  # 是否输出框架内部系统日志；业务 ERROR/FATAL 不受此开关影响。
+  enable_system_logs: true
+
+process:
+  # 是否守护运行由命令行 -d 0|1 控制，不从 YAML 读取。
+  # 在创建线程前屏蔽的信号编号，由 HttpServer 的 signalfd 统一处理。
+  # 2=SIGINT，15=SIGTERM，13=SIGPIPE（Linux）。
+  blocked_signals: [2, 15, 13]
+
+http:
+  # HTTP 服务监听端口。
+  port: 8080
+  # HTTP worker 线程数；每个 worker 拥有独立 io_uring 调度器。
+  worker_threads: 4
+  # 单连接最多处理的 keep-alive 请求数；0 表示不限制。
+  keepalive_max_requests: 0
+  # keep-alive 连接等待下一次请求的超时时间（秒）。
+  keepalive_timeout_sec: 30
+  # 首次读取 HTTP 请求的超时时间（秒）。
+  recv_timeout_sec: 10
+  # 发送 HTTP 响应的超时时间（秒）。
+  send_timeout_sec: 10
+  # 静态资源根目录；相对路径基于进程工作目录。
+  resource_dir: "res"
+
+cpu_pool:
+  # bcrypt 等 CPU 密集任务使用的工作线程数。
+  threads: 1
+  # CPU 线程池允许排队的最大任务数。
+  max_pending: 32
+
+mysql:
+  # MySQL 服务地址。
+  host: "127.0.0.1"
+  # MySQL 服务端口。
+  port: 3306
+  # MySQL 登录用户名。
+  user: "root"
+  # MySQL 登录密码；生产环境应替换并限制配置文件权限。
+  password: "123456"
+  # 业务数据库名称。
+  database: "webserver"
+  # MySQL 连接池最大连接数。
+  max_size: 16
+  # 缩容时保留的最少空闲连接数。
+  min_idle: 1
+  # 空闲连接回收检查间隔（秒）。
+  reap_interval_sec: 60
+  # 是否为 MySQL 连接启用 TLS。
+  use_ssl: false
+  # 建立 MySQL 连接的超时时间（秒）。
+  connect_timeout_sec: 10
+
+redis:
+  # Redis 服务地址，仅支持点分 IPv4。
+  host: "127.0.0.1"
+  # Redis 服务端口。
+  port: 6379
+  # Redis 密码；未启用认证时保持空字符串。
+  password: ""
+  # Redis 数据库编号；0 表示不额外发送 SELECT。
+  database: 0
+  # Redis 连接池最大连接数。
+  max_size: 16
+  # 缩容时保留的最少空闲连接数。
+  min_idle: 1
+  # 空闲连接回收检查间隔（秒）。
+  reap_interval_sec: 60
+  # 建立 Redis 连接的超时时间（秒）。
+  connect_timeout_sec: 10
+
+session:
+  # Redis 中 session key 的前缀。
+  redis_key_prefix: "uco:sess:"
+  # Session Cookie 的 HMAC 签名密钥；生产环境必须使用随机强密钥。
+  secret_key: "uco-session-secret"
+  # Session 和 Cookie 的默认有效期（秒）。
+  max_age_sec: 2592000
+  # 浏览器 Cookie 名称。
+  cookie_name: "uco_session"
+  # Redis 中 默认的闪存键名。
+  flash_key: "_flash"
+  # Cookie Path 属性。
+  cookie_path: "/"
+  # Cookie Domain 属性；空字符串表示不下发 Domain。
+  cookie_domain: ""
+  # 是否设置 Cookie Secure；仅 HTTPS 部署应开启。
+  cookie_secure: false
+  # 是否设置 Cookie HttpOnly，防止 JavaScript 读取。
+  cookie_http_only: true
+  # 请求结束时是否自动保存已修改的 session。
+  auto_save: true
+  # 每次成功读取 session 时是否刷新 Redis TTL。
+  sliding: false
+  # Session Redis 命令的超时时间（秒）。
+  redis_timeout_sec: 10
+
+rate_limit:
+  # 所有限流中间件使用的固定窗口长度（秒）。
+  window_sec: 60
+  # 每次调用 ByIP() 创建的独立中间件按客户端 IP 的请求上限。
+  ip_per_window: 256
+  # ByNewSessionIP() 对新建匿名 session 按客户端 IP 的请求上限。
+  new_session_ip_per_window: 30
+  # 每次调用 BySession() 创建的独立中间件按 Session ID 的请求上限。
+  session_per_window: 10
+  # 每次调用 ByAccount() 创建的独立中间件按账号的请求上限。
+  account_per_window: 10
+
+csrf:
+  # Session 中保存 CSRF token 的键名；签发、校验和登录态刷新必须共用此值。
+  session_key: "csrf"
+  # 新建匿名 CSRF session 的有效期（秒）。
+  anonymous_max_age_sec: 600

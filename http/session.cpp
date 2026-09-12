@@ -5,6 +5,7 @@
 
 #include "http/session.h"
 
+#include "core/uconfig.h"
 #include "core/ulog.h"
 #include "core/uredis.h" // upool / UredisGuard / 命令.
 
@@ -28,6 +29,7 @@ namespace
 {
 
 static const char *kHexDigits = "0123456789abcdef";
+static const char *kSessionKey = "uco:session"; ///< HttpContext 用户数据键: 当前请求的 Session.
 
 /// 追加一个 JSON 转义后的字符串 (含引号).
 static void JsonEscapeAppend(std::string &out, const std::string &s)
@@ -346,19 +348,34 @@ static bool ParseFlashArray(const std::string &in, std::vector<std::string> &out
 
 // ==================== SessionStore ====================
 
-SessionStore::SessionStore(const Config &cfg, uredis::upool &pool)
-    : m_pool(pool)
+SessionStore::SessionStore(const uco::YamlConfig &config,
+                           uredis::upool &pool)
+    : m_keyPrefix(
+          config.Get<std::string>("session.redis_key_prefix", "uco:sess:")),
+      m_secretKey(config.Get<std::string>("session.secret_key",
+                                          "uco-session-secret")),
+      m_cookieName(
+          config.Get<std::string>("session.cookie_name", "uco_session")),
+      m_flashKey(config.Get<std::string>("session.flash_key", "_flash")),
+      m_maxAge(config.Get<int>("session.max_age_sec", 86400 * 30)),
+      m_cookiePath(config.Get<std::string>("session.cookie_path", "/")),
+      m_cookieDomain(config.Get<std::string>("session.cookie_domain", "")),
+      m_secure(config.Get<bool>("session.cookie_secure", false)),
+      m_httpOnly(config.Get<bool>("session.cookie_http_only", true)),
+      m_autoSave(config.Get<bool>("session.auto_save", true)),
+      m_sliding(config.Get<bool>("session.sliding", false)), m_pool(pool)
 {
-    m_cfg = cfg;
-    if (m_cfg.key_prefix.empty())
+    m_redisTimeout.tv_sec =
+        config.Get<time_t>("session.redis_timeout_sec", 10);
+    if (m_keyPrefix.empty())
     {
-        m_cfg.key_prefix = "uco:sess:";
+        m_keyPrefix = "uco:sess:";
     }
-    if (m_cfg.max_age <= 0)
+    if (m_maxAge <= 0)
     {
-        m_cfg.max_age = 86400 * 30;
+        m_maxAge = 86400 * 30;
     }
-    if (m_cfg.secret_key.empty())
+    if (m_secretKey.empty())
     {
         // 未配置签名密钥: 生成进程级临时密钥兜底.
         // 副作用: 重启后旧会话全部验签失败 (相当于强制全员下线),
@@ -368,13 +385,13 @@ SessionStore::SessionStore(const Config &cfg, uredis::upool &pool)
         {
             for (unsigned char b : buf)
             {
-                m_cfg.secret_key += kHexDigits[b >> 4];
-                m_cfg.secret_key += kHexDigits[b & 0xf];
+                m_secretKey += kHexDigits[b >> 4];
+                m_secretKey += kHexDigits[b & 0xf];
             }
         }
         else
         {
-            m_cfg.secret_key = "uco-session-fallback-secret";
+            m_secretKey = "uco-session-fallback-secret";
         }
         LOGWRN("session: secret_key empty, ephemeral key generated"
                " (all sessions invalidated on restart)");
@@ -398,7 +415,7 @@ uco::task<SessionStore::LoadResult> SessionStore::LoadValues(const std::string &
     uredis::UredisGuard guard(m_pool, conn); // RAII 归还连接.
 
     uredis::Reply r =
-        co_await uredis::uget(conn, m_cfg.key_prefix + id, m_cfg.ts);
+        co_await uredis::uget(conn, m_keyPrefix + id, m_redisTimeout);
     if (r.ret_code != 0)
     {
         LOGERR("session: redis get failed:", r.err_msg);
@@ -418,7 +435,7 @@ uco::task<bool> SessionStore::SaveValues(const std::string &id,
     if (ttl <= 0)
     {
         // 会话语义 (MaxAge=0) 的 Redis 侧回退默认值, 同 gin 的 DefaultMaxAge.
-        ttl = m_cfg.max_age;
+        ttl = m_maxAge;
     }
 
     uredis::uconnection *conn =
@@ -434,13 +451,13 @@ uco::task<bool> SessionStore::SaveValues(const std::string &id,
     std::vector<std::string> args;
     args.reserve(5);
     args.emplace_back("SET");
-    args.emplace_back(m_cfg.key_prefix + id);
+    args.emplace_back(m_keyPrefix + id);
     args.emplace_back(json);
     args.emplace_back("EX");
     args.emplace_back(std::to_string(ttl));
 
     uredis::Reply r =
-        co_await uredis::ucommand(conn, std::move(args), m_cfg.ts);
+        co_await uredis::ucommand(conn, std::move(args), m_redisTimeout);
     if (r.ret_code != 0 || r.type != uredis::Reply::STATUS || r.str != "OK")
     {
         LOGERR("session: redis set failed:", r.err_msg);
@@ -461,8 +478,8 @@ uco::task<bool> SessionStore::RemoveKey(const std::string &id)
     uredis::UredisGuard guard(m_pool, conn);
 
     std::vector<std::string> keys;
-    keys.emplace_back(m_cfg.key_prefix + id);
-    uredis::Reply r = co_await uredis::udel(conn, std::move(keys), m_cfg.ts);
+    keys.emplace_back(m_keyPrefix + id);
+    uredis::Reply r = co_await uredis::udel(conn, std::move(keys), m_redisTimeout);
     if (r.ret_code != 0)
     {
         LOGERR("session: redis del failed:", r.err_msg);
@@ -475,7 +492,7 @@ uco::task<bool> SessionStore::TouchTTL(const std::string &id, int ttl)
 {
     if (ttl <= 0)
     {
-        ttl = m_cfg.max_age;
+        ttl = m_maxAge;
     }
 
     uredis::uconnection *conn =
@@ -488,7 +505,7 @@ uco::task<bool> SessionStore::TouchTTL(const std::string &id, int ttl)
     uredis::UredisGuard guard(m_pool, conn);
 
     uredis::Reply r =
-        co_await uredis::uexpire(conn, m_cfg.key_prefix + id, ttl, m_cfg.ts);
+        co_await uredis::uexpire(conn, m_keyPrefix + id, ttl, m_redisTimeout);
     if (r.ret_code != 0)
     {
         LOGERR("session: redis expire failed:", r.err_msg);
@@ -527,7 +544,7 @@ std::string SessionStore::SignID(const std::string &id)
 {
     unsigned char mac[EVP_MAX_MD_SIZE] = {0};
     unsigned int maclen = 0;
-    HMAC(EVP_sha256(), m_cfg.secret_key.data(), (int)m_cfg.secret_key.size(),
+    HMAC(EVP_sha256(), m_secretKey.data(), (int)m_secretKey.size(),
          (const unsigned char *)id.data(), id.size(), mac, &maclen);
 
     std::string sig;
@@ -682,16 +699,18 @@ void Session::Clear()
     }
 }
 
-void Session::AddFlash(const std::string &value, const std::string &key)
+void Session::AddFlash(const std::string &value, const std::string &inkey)
 {
+    const std::string& key = inkey.empty() ? m_ptrStore->m_flashKey : inkey;
     std::vector<std::string> items;
     ParseFlashArray(Get(key), items); // 旧值缺失/损坏均视作空 (损坏自愈).
     items.push_back(value);
     Set(key, DumpFlashArray(items));
 }
 
-std::vector<std::string> Session::Flashes(const std::string &key)
+std::vector<std::string> Session::Flashes(const std::string &inkey)
 {
+    const std::string& key = inkey.empty() ? m_ptrStore->m_flashKey : inkey;
     std::vector<std::string> items;
     if (!ParseFlashArray(Get(key), items))
     {
@@ -728,7 +747,6 @@ void Session::Destroy()
 uco::task<void> Session::InitLoad()
 {
     SessionStore &store = *m_ptrStore;
-    const SessionStore::Config &cfg = store.m_cfg;
 
     // 1. cookie 解析 + 验签 (无 cookie / 验签失败 -> 全新会话).
     const std::string cookie = m_ptrCtx->GetCookie(m_sName);
@@ -769,7 +787,7 @@ uco::task<void> Session::InitLoad()
     }
 
     // 3. 滑动续期: 命中即 EXPIRE (只刷 TTL, 不重写数据).
-    if (cfg.sliding && !m_bNew)
+    if (store.m_sliding && !m_bNew)
     {
         if (!co_await store.TouchTTL(m_sID, EffectiveMaxAge()))
         {
@@ -780,8 +798,7 @@ uco::task<void> Session::InitLoad()
 
 int Session::EffectiveMaxAge() const
 {
-    const SessionStore::Config &cfg = m_ptrStore->m_cfg;
-    return m_iMaxAgeOverride >= 0 ? m_iMaxAgeOverride : cfg.max_age;
+    return m_iMaxAgeOverride >= 0 ? m_iMaxAgeOverride : m_ptrStore->m_maxAge;
 }
 
 uco::task<bool> Session::Save()
@@ -893,37 +910,34 @@ uco::task<bool> Session::Rotate()
 void Session::WriteCookie(int max_age)
 {
     SessionStore &store = *m_ptrStore;
-    const SessionStore::Config &cfg = store.m_cfg;
 
     // cookie 值 = "id.sig": 只存 ID 与签名, 数据本体在 Redis.
     // SameSite=Lax 为 CSRF 缓解默认 (gin 同款机制: SetSameSite 作用于 SetCookie).
     m_ptrCtx->SetSameSite(HttpContext::eSameSiteLax);
     m_ptrCtx->SetCookie(m_sName, m_sID + "." + store.SignID(m_sID),
-                        max_age, cfg.path, cfg.domain, cfg.secure,
-                        cfg.http_only);
+                        max_age, store.m_cookiePath, store.m_cookieDomain,
+                        store.m_secure, store.m_httpOnly);
 }
 
 void Session::ExpireCookie()
 {
     SessionStore &store = *m_ptrStore;
-    const SessionStore::Config &cfg = store.m_cfg;
 
     // 删除 cookie (gin 同款写法: 空值 + 负 MaxAge -> "Max-Age=0").
     m_ptrCtx->SetSameSite(HttpContext::eSameSiteLax);
-    m_ptrCtx->SetCookie(m_sName, "", -1, cfg.path, cfg.domain,
-                        cfg.secure, cfg.http_only);
+    m_ptrCtx->SetCookie(m_sName, "", -1, store.m_cookiePath,
+                        store.m_cookieDomain, store.m_secure,
+                        store.m_httpOnly);
 }
 
 // ==================== 中间件 ====================
 
-uco::task<void> SessionStore::MiddlewareImpl(SessionStore *store,
-                                              const std::string &name,
-                                              HttpContext *ctx)
+uco::task<void> SessionStore::Sessions(HttpContext *ctx)
 {
     // 1. 创建并加载会话 (cookie 验签 + Redis 读取).
     //    与 gin 的惰性加载不同: 请求进入即加载, 换取 Get() 同步语义.
     // make_unique 无法访问私有构造 (它不是友元), 友元内直接 new.
-    std::unique_ptr<Session> session(new Session(store, name, ctx));
+    std::unique_ptr<Session> session(new Session(this, m_cookieName, ctx));
     co_await session->InitLoad();
 
     // 2. 挂到请求上下文 (≈ gin 的 c.Set(DefaultKey, s)),
@@ -934,8 +948,8 @@ uco::task<void> SessionStore::MiddlewareImpl(SessionStore *store,
     co_await ctx->Next();
 
     // 3. 链正常结束: 补存忘保存的脏数据 (C++ 场景默认兜底,
-    //    gin 要求手动 Save; 可经 Config::auto_save 关闭以对齐 gin).
-    if (store->m_cfg.auto_save && session->m_bWritten)
+    //    gin 要求手动 Save; 可经 session.auto_save 关闭以对齐 gin).
+    if (m_autoSave && session->m_bWritten)
     {
         if (!co_await session->Save())
         {
@@ -945,15 +959,4 @@ uco::task<void> SessionStore::MiddlewareImpl(SessionStore *store,
 
     // 4. guard 析构摘除; unique_ptr 析构, Session 指针自此失效.
     co_return;
-}
-
-HttpServer::HandleFunc Sessions(SessionStore *store, const std::string &name)
-{
-    // ≈ gin 的 sessions.Sessions(name, store): 闭包捕获 store 与 name
-    // (gin: session.name). 闭包随 HandleFunc 拷入路由树; 含 string 超出
-    // std::function 的 SBO, 每请求路由匹配拷贝时一次堆分配,
-    // 相比请求本身的解析开销可忽略.
-    return [store, name](HttpContext *ctx) -> uco::task<void> {
-        return SessionStore::MiddlewareImpl(store, name, ctx);
-    };
 }

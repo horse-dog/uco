@@ -1,3 +1,4 @@
+#include "core/uconfig.h"
 #include "core/ulog.h"
 #include "core/uredis.h"
 #include "core/uio.h"
@@ -156,11 +157,12 @@ task<void> demo_watchdog()
 // ==================== 入口 ====================
 task<void> demo()
 {
-    uredis::upool::config cfg;
-    cfg.max_size = 4;
-    cfg.min_idle = 1;
-    cfg.reap_interval_ms = 2'000;
-    uredis::upool pool(cfg);
+    uco::YamlConfig config;
+    if (!config.Load(PROJECT_SOURCE_DIR "/tests/pool_config.yaml"))
+    {
+        LOGFTL("failed to load tests/pool_config.yaml");
+    }
+    uredis::upool pool(config);
 
     cobatch batchrunner(5);
     batchrunner.add(demo1(pool));

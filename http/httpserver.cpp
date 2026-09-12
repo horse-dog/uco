@@ -1,7 +1,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -796,6 +799,20 @@ HttpServer::~HttpServer()
 }
 
 // 构造即配置 (原两阶段 Init 收编, Init 保留为私有实现).
+HttpServer::HttpServer(const uco::YamlConfig &config,
+                       const std::string &prefix)
+    : HttpServer(
+          config.Get<int>(prefix + ".port", 8080),
+          config.Get<int>(prefix + ".worker_threads", 4),
+          config.Get<int>(prefix + ".keepalive_max_requests", 100),
+          config.Get<int>(prefix + ".keepalive_timeout_sec", 60),
+          config.Get<int>(prefix + ".recv_timeout_sec", 10),
+          config.Get<int>(prefix + ".send_timeout_sec", 10),
+          config.Get<std::string>(prefix + ".resource_dir", "res")
+      )
+    {
+    }
+
 HttpServer::HttpServer(int port, int num_threads, int keepalivecnt,
                        int keepalivesec, int recvtimeoutsec,
                        int sendtimeoutsec, const std::string &resourceDir)
@@ -803,6 +820,14 @@ HttpServer::HttpServer(int port, int num_threads, int keepalivecnt,
     if (num_threads <= 0)
     {
         SYSFTL("num_threads must be > 0");
+    }
+    if (keepalivecnt < 0)
+    {
+        SYSFTL("keepalivecnt must be >= 0");
+    }
+    if (keepalivecnt == 0)
+    {
+        keepalivecnt = std::numeric_limits<std::int32_t>::max();
     }
     Init(port, num_threads, keepalivecnt, keepalivesec, recvtimeoutsec,
          sendtimeoutsec, resourceDir);
@@ -814,7 +839,7 @@ void HttpServer::Init(int port, int num_threads, int keepalivecnt,
 {
     this->m_iPort = port;
     this->m_iNumThreads = num_threads;
-    this->m_sResourceDir = resourceDir;
+    this->m_sResourceDir = (std::filesystem::path(PROJECT_SOURCE_DIR) / resourceDir).string();
     this->m_iKeepAliveCount = keepalivecnt;
     this->m_iKeepAliveTime = keepalivesec;
     this->m_iRecvTimeOut = recvtimeoutsec;
@@ -838,7 +863,7 @@ uco::task<void> HttpServer::Run()
             });
     }
 
-    SYSMSG("threads size:", m_vecThreads.size());
+    SYSMSG("threads size:", m_vecThreads.size() + 1); // +1 is me.
 
     uco::cobatch batchrunner;
     m_vecWorkers[0].Init(this, m_iPort);

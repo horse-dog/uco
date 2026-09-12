@@ -8,11 +8,12 @@
 #include "http/ratelimit.h"
 #include "http/session.h"
 #include "core/uco.h"
+#include "core/uconfig.h"
 #include "core/udaemon.h"
 #include "core/ulog.h"
 #include "demo/demo.pb.h"
 #include <cstdio>
-#include <signal.h>
+#include <utility>
 #include <sys/eventfd.h>
 #include <unistd.h>
 #include "core/usql.h"
@@ -112,24 +113,6 @@ task<void> post(HttpContext *context)
     co_return;
 }
 
-auto MakeMySqLPool()
-{
-    usql::upool::config config;
-    config.host = "127.0.0.1";
-    config.user = "root";
-    config.pass = "123456";
-    config.db = "webserver";
-    config.max_size = 16;
-    return usql::upool(config);
-}
-
-auto MakeRedisPool()
-{
-    uredis::upool::config config;
-    config.max_size = 16;
-    return uredis::upool(config);
-}
-
 void PrepareStaticResource(HttpServer& httpserver)
 {
     // 静态资源.
@@ -181,47 +164,44 @@ void PrepareDemo(HttpServer& httpserver)
     httpserver.POST("/post", post);
 }
 
-task<void> RunHttpServer()
+task<void> RunHttpServer(uco::YamlConfig app_config)
 {
     using namespace webserver;
-    // 7. 定义 Server 实例.
-    HttpServer httpserver(8080, 4, 100, 30);
+    // 1. 定义 server 实例.
+    HttpServer httpserver(app_config);
 
-    // 0. 定义 CPU 线程池.
-    uco::thread_pool thread_pool(1, 32);
+    // 2. 定义 cpu 线程池.
+    size_t cpu_threads = app_config.Get<size_t>("cpu_pool.threads", 1);
+    size_t cpu_max_pending = app_config.Get<size_t>("cpu_pool.max_pending", 32);
+    uco::thread_pool thread_pool(cpu_threads, cpu_max_pending);
 
-    // 定义密码哈希器.
+    // 3. 定义密码哈希组件 (重 cpu 逻辑, 依赖注入 cpu 线程池).
     security::BcryptPasswordHasher hasher(thread_pool);
 
-    // 1. 创建连接池.
-    auto mysql_pool = MakeMySqLPool();
-    auto redis_pool = MakeRedisPool();
+    // 4. 定义连接池.
+    usql::upool mysql_pool(app_config);
+    uredis::upool redis_pool(app_config);
 
-    // 2. 定义 DAO 实例 (依赖 SQL 连接池).
+    // 5. 定义 DAO 实例 (依赖 SQL 连接池).
     dao::MySqlUserDao userDAO(mysql_pool);
 
-    // 3. 定义 Service 实例 (依赖 DAO).
+    // 6. 定义 Service 实例 (依赖 DAO).
     service::UserService userService(userDAO, hasher);
 
-    // 4. 定义 Controller 实例 (依赖 Service).
-    controller::UserController userController(userService);
+    // 7. CSRF 组件.
+    csrf::Csrf csrf(app_config);
 
-    // 5. 定义 Session.
-    SessionStore::Config session_cfg;
-    // 密钥一般存于配置文件，此处偷懒直接 hardcode.
-    session_cfg.secret_key = "uco-session-secret";
-    // SessionStore 依赖 Redis 连接池.
-    SessionStore store(session_cfg, redis_pool);
-    // cookie 中存 session 的 key 名.
-    const std::string kSessionName = "uco_session";
-    // session 中存 csrf_token 的 key 名.
-    const std::string &kCsrfKey = controller::kCsrfSessionKey;
+    // 8. 定义 SessionStore.
+    SessionStore store(app_config, redis_pool);
 
-    // 6. 限流配置.
-    constexpr int kIpRatePerMin = 256; // IP 层限流阈值 (次/分钟).
-    constexpr int kNewSessionIpRatePerMin = 30; // 仅新建匿名会话按 IP 计数, 已有会话不限制频率.
+    // 9. 定义限流器.
+    ratelimit::FixedWindow limiter(app_config);
 
-    // 8. 定义业务接口.
+    // 10. 定义 Controller 实例.
+    /// TODO: 这里依赖 csrf.SessionKey(), 感觉不好.
+    controller::UserController userController(userService, csrf.SessionKey());
+
+    // 11. 定义业务接口.
     PrepareStaticResource(httpserver);
     PrepareForward(httpserver);
     PrepareErrorPage(httpserver);
@@ -229,53 +209,53 @@ task<void> RunHttpServer()
 
     httpserver.GET(
         "/api/csrf",
-        Sessions(&store, kSessionName),
-        ratelimit::FixedWindow(kNewSessionIpRatePerMin, 60, ratelimit::KeyBy::NewSessionIP),
-        csrf::SessionIssue(kCsrfKey, 600)
+        MakeHandler(store, Sessions),
+        MakeHandler(limiter, ByNewSessionIP),
+        MakeHandler(csrf, SessionIssue)
     );
     httpserver.GET(
         "/api/me",
-        Sessions(&store, kSessionName),
+        MakeHandler(store, Sessions),
         MakeHandler(userController, CurrentUser)
     );
     httpserver.GET(
         "/register",
-        Sessions(&store, kSessionName),
+        MakeHandler(store, Sessions),
         MakeHandler(userController, RegisterPage)
     );
     httpserver.POST(
         "/register",
-        ratelimit::FixedWindow(kIpRatePerMin, 60),
-        Sessions(&store, kSessionName),
+        MakeHandler(limiter, ByIP),
+        MakeHandler(store, Sessions),
         MakeHandler(userController, RequireAnonymous),
-        ratelimit::FixedWindow(5, 60, ratelimit::KeyBy::SessionID),
-        csrf::SessionCheck(kCsrfKey),
+        MakeHandler(limiter, BySession),
+        MakeHandler(csrf, SessionCheck),
         MakeHandler(userController, Register)
     );
     httpserver.GET(
         "/login",
-        Sessions(&store, kSessionName),
+        MakeHandler(store, Sessions),
         MakeHandler(userController, LoginPage)
     );
     httpserver.POST(
         "/login",
-        ratelimit::FixedWindow(kIpRatePerMin, 60),
-        Sessions(&store, kSessionName),
-        ratelimit::FixedWindow(10, 60, ratelimit::KeyBy::Account),
-        csrf::SessionCheck(kCsrfKey),
+        MakeHandler(limiter, ByIP),
+        MakeHandler(store, Sessions),
+        MakeHandler(limiter, ByAccount),
+        MakeHandler(csrf, SessionCheck),
         MakeHandler(userController, Login)
     );
     httpserver.POST(
         "/logout",
-        ratelimit::FixedWindow(kIpRatePerMin, 60),
-        Sessions(&store, kSessionName),
-        ratelimit::FixedWindow(10, 60, ratelimit::KeyBy::SessionID),
-        csrf::SessionCheck(kCsrfKey),
+        MakeHandler(limiter, ByIP),
+        MakeHandler(store, Sessions),
+        MakeHandler(limiter, BySession),
+        MakeHandler(csrf, SessionCheck),
         MakeHandler(userController, Logout)
     );
     httpserver.GET(
         "/welcome",
-        Sessions(&store, kSessionName),
+        MakeHandler(store, Sessions),
         MakeHandler(userController, WelcomePage)
     );
 
@@ -283,21 +263,68 @@ task<void> RunHttpServer()
     co_await httpserver.Run();
 }
 
+void ParseArgs(int argc, const char* argv[], bool& daemonize, std::string& config_path)
+{
+    daemonize = false; // default value.
+    config_path = PROJECT_SOURCE_DIR "/server/config.yaml"; // default value.
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string option = argv[i];
+        if (option == "-c" && i + 1 < argc)
+        {
+            config_path = argv[++i];
+        }
+        else if (option == "-d" && i + 1 < argc)
+        {
+            const std::string value = argv[++i];
+            if (value == "0")
+                daemonize = false;
+            else if (value == "1")
+                daemonize = true;
+            else
+            {
+                fprintf(stderr, "-d must be 0 or 1\n");
+                exit(1);
+            }
+        }
+        else
+        {
+            fprintf(stderr, "usage: %s [-c config] [-d 0|1]\n", argv[0]);
+            exit(1);
+        }
+    }
+}
+
 int main(int argc, const char *argv[])
 {
-    // 1. 开启日志系统.
-    uco::OpenLog(
-        "ucohttpsvr",
-        LogLevel::INFO,
-        LogMode::CONSOLE,
-        true
-    );
+    // 1. 解析命令行参数.
+    bool daemonize = false;
+    std::string config_path;
+    ParseArgs(argc, argv, daemonize, config_path);
 
-    // 2. 进程初始化，并在创建任何线程前屏蔽服务信号；后续线程继承掩码.
-    uco::InitProcess(false, "ucohttpsvr", {SIGINT, SIGTERM, SIGPIPE});
+    // 2. 加载配置文件.
+    uco::YamlConfig config;
+    if (!config.Load(config_path))
+    {
+        fprintf(stderr, "failed to load server config: %s\n",
+                config_path.c_str());
+        return 1;
+    }
 
-    // 4. 启动服务.
-    go RunHttpServer();
+    auto module = config.Get<std::string>("module_name", "ucohttpsvr");
 
+    // 3. 开启日志系统.
+    auto level = config.Get<LogLevel>("logging.level", LogLevel::INFO);
+    auto mode = config.Get<LogMode>("logging.mode", LogMode::CONSOLE);
+    auto syslog = config.Get<bool>("logging.enable_system_logs", true);
+    uco::OpenLog(module, level, mode, syslog);
+
+    // 4. 进程初始化，并在创建任何线程前屏蔽服务信号；后续线程继承掩码.
+    const auto blocked_signals =
+        config.GetList<int>("process.blocked_signals");
+    uco::InitProcess(daemonize, module, blocked_signals);
+
+    // 5. 启动服务, 异步任务需要值传递 config.
+    go RunHttpServer(std::move(config));
     return 0;
 }

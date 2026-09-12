@@ -7,7 +7,7 @@
  * 路由注册 (装配层用 MakeHandler 绑定成员协程, ≈ gin 的方法值):
  * @code
  *   httpserver.GET("/login",
- *                  Sessions(&store, "uco_session"),
+ *                  MakeHandler(store, Sessions),
  *                  MakeHandler(userController, LoginPage));
  * @endcode
  *
@@ -21,6 +21,8 @@
 #include "http/httpserver.h"
 #include "server/service/user.h" // service 层接口 (webserver::service::IUserService)
 
+#include <string>
+
 class Session;
 
 namespace webserver
@@ -28,13 +30,10 @@ namespace webserver
 namespace controller
 {
 
-/// session 中 CSRF token 的键名 (应用层策略, 传给 csrf.h 的工厂).
-inline constexpr const char *kCsrfSessionKey = "csrf";
-
 class UserController final
 {
   public:
-    explicit UserController(service::IUserService &svc);
+    UserController(service::IUserService &svc, std::string csrf_session_key);
     ~UserController() = default;
     UserController(const UserController &) = delete;
     UserController &operator=(const UserController &) = delete;
@@ -98,10 +97,11 @@ class UserController final
      * @param username 用户名.
      * @return 成功 true; 失败 false 且会话回滚为原样 (应答 500).
      */
-    static uco::task<bool> EstablishLoginSession(Session *s, uint64_t vid,
-                                                 const std::string &username);
+    uco::task<bool> EstablishLoginSession(Session *s, uint64_t vid,
+                                          const std::string &username);
 
     service::IUserService &m_svc; ///< 业务接口 (引用: 非空契约).
+    std::string m_csrfSessionKey; ///< Session 中保存 CSRF token 的配置键名.
 };
 
 } // namespace controller

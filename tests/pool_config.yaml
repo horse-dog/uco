@@ -1,0 +1,21 @@
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "root"
+  password: "123456"
+  database: "webserver"
+  max_size: 4
+  min_idle: 1
+  reap_interval_sec: 2
+  use_ssl: false
+  connect_timeout_sec: 10
+
+redis:
+  host: "127.0.0.1"
+  port: 6379
+  password: ""
+  database: 0
+  max_size: 4
+  min_idle: 1
+  reap_interval_sec: 2
+  connect_timeout_sec: 10

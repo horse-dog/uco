@@ -1,5 +1,6 @@
 #define _UCO_THREAD_ENV_IMPL
 #include "core/uredis.h"
+#include "core/uconfig.h"
 #include "core/ulog.h"
 
 #include <arpa/inet.h>
@@ -542,24 +543,25 @@ uco::task<Reply> uping(uconnection *c, uco_time_t ts)
 
 // ==================== 连接池 ====================
 
-void upool::Init(const config &cfg)
+upool::upool(const uco::YamlConfig &config)
 {
-    st_ = std::make_shared<state>(cfg, cfg.max_size ? cfg.max_size : 1);
-    if (st_->cfg.max_size == 0)
-    {
-        st_->cfg.max_size = 1;
-    }
+    const size_t max_size = config.Get<size_t>("redis.max_size", 16);
+    st_ = std::make_shared<state>(max_size == 0 ? 1 : max_size);
+    st_->host = config.Get<std::string>("redis.host", "127.0.0.1");
+    st_->port = config.Get<unsigned int>("redis.port", 6379);
+    st_->pass = config.Get<std::string>("redis.password", "");
+    st_->db = config.Get<int>("redis.database", 0);
+    st_->min_idle = config.Get<size_t>("redis.min_idle", 1);
+    st_->reap_interval_sec =
+        config.Get<uint64_t>("redis.reap_interval_sec", 60);
+    st_->ts.tv_sec = config.Get<time_t>("redis.connect_timeout_sec", 10);
+    st_->ts.tv_nsec = 0;
     go reaper(st_);
-}
-
-upool::upool(const config &cfg)
-{
-    Init(cfg);
 }
 
 upool::~upool() { Close(); }
 
-/// 后台缩容协程: 每 reap_interval_ms 关闭一个 idle, 保底 min_idle.
+/// 后台缩容协程: 每 reap_interval_sec 秒关闭一个 idle, 保底 min_idle.
 /// 睡在可取消定时器上, close() 经 waker.wake() 立即唤醒 (微秒级),
 /// 无需轮询 closed 标志, 不拖垮调度器收尾.
 /// 帧内持有 state 的 shared_ptr, 池析构后仍可安全访问并自行退出.
@@ -568,7 +570,7 @@ uco::task<void> upool::reaper(std::shared_ptr<state> st)
     while (true)
     {
         co_await st->waker.sleep_for(
-            std::chrono::milliseconds(st->cfg.reap_interval_ms));
+            std::chrono::seconds(st->reap_interval_sec));
         if (st->closed)
         {
             co_return;
@@ -577,7 +579,7 @@ uco::task<void> upool::reaper(std::shared_ptr<state> st)
         uconnection *victim = nullptr;
         {
             std::lock_guard<std::mutex> guard(st->mtx);
-            if (!st->closed && st->idle.size() > st->cfg.min_idle)
+            if (!st->closed && st->idle.size() > st->min_idle)
             {
                 victim = st->idle.front();
                 st->idle.pop_front();
@@ -615,8 +617,8 @@ uco::task<uconnection *> upool::Acquire()
     }
 
     // 新建连接 (不持锁).
-    c = co_await uconnect(st->cfg.host.c_str(), st->cfg.port,
-                          st->cfg.pass.c_str(), st->cfg.db, st->cfg.ts);
+    c = co_await uconnect(st->host.c_str(), st->port, st->pass.c_str(),
+                          st->db, st->ts);
     if (c == nullptr)
     {
         st->permits.signal();

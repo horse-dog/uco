@@ -26,6 +26,11 @@
 #include <string>
 #include <vector>
 
+namespace uco
+{
+class YamlConfig;
+}
+
 namespace uredis
 {
 
@@ -140,20 +145,8 @@ uco::task<Reply> uping(uconnection *c, uco_time_t ts = {10, 0});
 class upool
 {
   public:
-    /// 配置.
-    struct config
-    {
-        std::string host = "127.0.0.1"; ///< 主机 (点分 IPv4).
-        unsigned int port = 6379;       ///< 端口.
-        std::string pass;               ///< 密码 (空则不 AUTH).
-        int db = 0;                     ///< 库编号 (0 则不 SELECT).
-        size_t max_size = 16;           ///< 最大连接数 (并发限制).
-        size_t min_idle = 1;            ///< idle 保底数, 低于等于此值不再关闭.
-        uint64_t reap_interval_ms = 60000; ///< 缩容间隔 (ms), 每次关闭一个 idle.
-        uco_time_t ts = {10, 0};        ///< 建连超时.
-    };
-
-    upool(const config &cfg);
+    /** @brief 从 redis.* 配置构造连接池并复制运行期参数。 */
+    explicit upool(const uco::YamlConfig &config);
    ~upool();
     upool(const upool &) = delete;
     upool &operator=(const upool &) = delete;
@@ -174,28 +167,28 @@ class upool
     void Close();
 
   private:
-    /// 初始化状态并启动 reaper. 仅由构造函数调用, 不可重复执行.
-    void Init(const config &cfg);
-
     /// 内部状态: shared_ptr 共享所有权 (reaper 协程与进行中的 acquire 各持
     /// 一份), 保证池析构后协程仍能安全访问状态并自行退出.
     struct state
     {
-        state(const config &c, size_t permits_cnt)
-            : cfg(c), permits(permits_cnt)
-        {
-        }
+        explicit state(size_t permits_cnt) : permits(permits_cnt) {}
 
-        config cfg;
+        std::string host;
+        unsigned int port = 6379;
+        std::string pass;
+        int db = 0;
+        size_t min_idle = 1;
+        uint64_t reap_interval_sec = 60;
+        uco_time_t ts = {10, 0};
         std::atomic<bool> closed{false};
-        std::mutex mtx;                     ///< 保护 idle/all (临界区内无 co_await).
-        uco::usema permits;                 ///< 槽位信号量, 容量 = max_size.
-        std::deque<uconnection *> idle;     ///< 空闲连接 (队首最老).
-        std::set<uconnection *> all;        ///< 全部存活连接 (含借出中).
-        uco::usleeper waker;                  ///< 可取消定时器, 供 reaper 睡眠.
+        std::mutex mtx;                 ///< 保护 idle/all (临界区内无 co_await).
+        uco::usema permits;             ///< 槽位信号量, 容量 = max_size.
+        std::deque<uconnection *> idle; ///< 空闲连接 (队首最老).
+        std::set<uconnection *> all;    ///< 全部存活连接 (含借出中).
+        uco::usleeper waker;            ///< 可取消定时器, 供 reaper 睡眠.
     };
 
-    /// 后台缩容协程: 每 reap_interval_ms 关闭一个 idle, 保底 min_idle.
+    /// 后台缩容协程: 每 reap_interval_sec 秒关闭一个 idle, 保底 min_idle.
     /// 睡在可取消定时器上, close() 立即唤醒 (无需轮询, 不拖垮调度器收尾).
     /// static: 不依赖池对象生命周期, 仅通过 st 访问状态.
     static uco::task<void> reaper(std::shared_ptr<state> st);

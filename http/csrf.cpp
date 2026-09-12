@@ -3,8 +3,10 @@
  * @brief CSRF 机制实现, 见 csrf.h.
  */
 
-#include "core/ulog.h"
 #include "http/csrf.h"
+
+#include "core/uconfig.h"
+#include "core/ulog.h"
 #include "http/session.h"
 
 #include <openssl/crypto.h> // CRYPTO_memcmp (恒时比对)
@@ -13,25 +15,40 @@
 namespace csrf
 {
 
-// ---- 中间件实现 (工厂经闭包捕获 key 转发, 同 Sessions 模式) ----
+Csrf::Csrf(const uco::YamlConfig &config)
+    : m_sessionKey(config.Get<std::string>("csrf.session_key", "csrf")),
+      m_anonMaxAge(config.Get<int>("csrf.anonymous_max_age_sec", 600))
+{
+    if (m_sessionKey.empty())
+    {
+        m_sessionKey = "csrf";
+    }
+    if (m_anonMaxAge <= 0)
+    {
+        m_anonMaxAge = 600;
+    }
+}
 
-/// 签发实现: session[key] 为空则生成, 已有则复用.
-static uco::task<void> IssueImpl(const std::string &key, int anon_max_age,
-                                 HttpContext *ctx)
+Csrf::~Csrf() = default;
+
+// ---- 中间件实现 (成员协程经 MakeHandler 绑定, 同 Sessions 模式) ----
+
+/// 签发: session[key] 为空则生成, 已有则复用.
+uco::task<void> Csrf::SessionIssue(HttpContext *ctx)
 {
     Session *s = Session::FromContext(ctx);
 
-    std::string token = s->Get(key);
+    std::string token = s->Get(m_sessionKey);
     if (token.empty())
     { // 首次: 签发并存 session (链尾 auto_save 兜底落盘+下发 cookie).
         token = NewToken();
-        s->Set(key, token);
+        s->Set(m_sessionKey, token);
         // 匿名会话 (本请求新生, 仅含 token) 用短 TTL: 无 cookie 洪水
         // 每请求一个 key, 短驻把驻留时间从 30 天压到分钟级; 已存在
         // 会话保持原 TTL; 登录时 Rotate 重置覆盖, 升级会话回默认.
         if (s->IsNew())
         {
-            s->SetMaxAge(anon_max_age);
+            s->SetMaxAge(m_anonMaxAge);
         }
         LOGDBG("csrf: token issued, session:", s->ID());
     }
@@ -45,11 +62,11 @@ static uco::task<void> IssueImpl(const std::string &key, int anon_max_age,
     co_return;
 }
 
-/// 校验实现: 头与 session[key] 恒时比对.
-static uco::task<void> CheckImpl(const std::string &key, HttpContext *ctx)
+/// 校验: 头与 session[key] 恒时比对.
+uco::task<void> Csrf::SessionCheck(HttpContext *ctx)
 {
     // 恒时比对 (CRYPTO_memcmp), 与 cookie 验签 (session.cpp) 保持一致.
-    const std::string expected = Session::FromContext(ctx)->Get(key);
+    const std::string expected = Session::FromContext(ctx)->Get(m_sessionKey);
     const std::string submitted = ctx->GetHeader("X-CSRF-Token");
     const bool match = expected.size() == submitted.size() &&
                        CRYPTO_memcmp(expected.data(), submitted.data(),
@@ -66,22 +83,7 @@ static uco::task<void> CheckImpl(const std::string &key, HttpContext *ctx)
     co_await ctx->Next();
 }
 
-HttpServer::HandleFunc SessionIssue(const std::string &key,
-                                    int anon_max_age)
-{
-    return [key, anon_max_age](HttpContext *ctx) -> uco::task<void> {
-        return IssueImpl(key, anon_max_age, ctx);
-    };
-}
-
-HttpServer::HandleFunc SessionCheck(const std::string &key)
-{
-    return [key](HttpContext *ctx) -> uco::task<void> {
-        return CheckImpl(key, ctx);
-    };
-}
-
-std::string NewToken()
+std::string Csrf::NewToken()
 {
     unsigned char rnd[32];
     if (RAND_bytes(rnd, sizeof(rnd)) != 1)

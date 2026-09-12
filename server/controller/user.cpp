@@ -3,8 +3,8 @@
  * @brief HTTP 控制器实现 (UserController), 见 controller/user.h.
  *
  * 鉴权模式: cookie + session + CSRF token (synchronizer token):
- *   1. GET /api/csrf (框架 SessionCsrfIssue) 建立匿名 session 并签发
- *      token; 校验由框架 SessionCsrfCheck 中间件在链上完成
+ *   1. GET /api/csrf (框架 SessionIssue) 建立匿名 session 并签发
+ *      token; 校验由框架 SessionCheck 中间件在链上完成
  *      (均挂于 Sessions 之后, 见 csrf.h), 表单体只含业务字段;
  *   2. 登录成功写 session (vid/username), 刷新 token (防复用) 并轮换
  *      session ID (防 session fixation); Rotate 内含落盘 + cookie 下发;
@@ -20,6 +20,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 namespace webserver
 {
@@ -38,7 +39,9 @@ static constexpr const char *kNoticeCookie = "login_notice";
 /// /welcome 路径, 60 秒, 非 HttpOnly 供 JS 读取, 读后即焚).
 static constexpr const char *kWelcomeNoticeCookie = "welcome_notice";
 
-UserController::UserController(service::IUserService &svc) : m_svc(svc)
+UserController::UserController(service::IUserService &svc,
+                               std::string csrf_session_key)
+    : m_svc(svc), m_csrfSessionKey(std::move(csrf_session_key))
 {
 }
 
@@ -64,7 +67,7 @@ uco::task<bool> UserController::EstablishLoginSession(Session *s, uint64_t vid,
     // (防 session fixation, 纵深防御; 登录态只落新 key).
     s->Set(kKeyVid, std::to_string(vid));
     s->Set(kKeyUsername, username);
-    s->Set(kCsrfSessionKey, csrf::NewToken());
+    s->Set(m_csrfSessionKey, csrf::Csrf::NewToken());
     co_return co_await s->Rotate();
 }
 

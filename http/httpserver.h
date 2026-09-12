@@ -18,6 +18,7 @@
 #include <google/protobuf/message.h>
 
 #include "core/uco.h"
+#include "core/uconfig.h"
 #include "core/usync.h"
 
 #define BACKLOG 1024
@@ -42,11 +43,33 @@ class HttpServer
   public:
     /** @brief 路由处理函数，可为普通函数/lambda/成员函数绑定. */
     using HandleFunc = std::function<uco::task<void>(HttpContext *)>;
-    /** @brief 构造即完成配置 (Init 转私有实现); 须在日志系统初始化后构造. */
+    /**
+     * @brief 构造并配置 HTTP 服务器。
+     *
+     * 构造过程会创建 worker 配置并初始化退出信号处理，因此应在日志系统
+     * 初始化完成后、创建工作线程前调用。
+     *
+     * @param port 监听端口。
+     * @param num_threads HTTP worker 线程数，必须大于 0。
+     * @param keepalivecnt 单个连接允许处理的最大请求数；0 表示不限制，
+     *        内部按 std::int32_t 最大值处理；必须大于等于 0。
+     * @param keepalivesec keep-alive 状态下等待下一次请求的超时时间，单位秒。
+     * @param recvtimeoutsec 首次读取请求的超时时间，单位秒。
+     * @param sendtimeoutsec 发送响应的超时时间，单位秒。
+     * @param resourceDir 静态资源目录。
+     */
     HttpServer(int port, int num_threads = 4, int keepalivecnt = 100,
                int keepalivesec = 60, int recvtimeoutsec = 10,
                int sendtimeoutsec = 10,
-               const std::string &resourceDir = "../res");
+               const std::string &resourceDir = "res");
+
+    /**
+     * @brief 从 YAML 配置的指定节点构造 HTTP 服务器。
+     * @param config 配置读取器。
+     * @param prefix HTTP 配置节点前缀，默认读取 http.*。
+     */
+    explicit HttpServer(const uco::YamlConfig &config,
+                        const std::string &prefix = "http");
     ~HttpServer();
     uco::task<void> Run();
 
@@ -476,5 +499,24 @@ class HttpContext
     [ptr = &obj, m = &std::decay_t<decltype(obj)>::method]                    \
         (HttpContext *ctx) -> uco::task<void>                                 \
     {                                                                         \
-        co_return co_await (ptr->*m)(ctx);                                    \
+        co_return co_await [](auto *p, auto mm, HttpContext *c)               \
+            -> uco::task<void>                                                \
+        {                                                                     \
+            if constexpr (std::is_same_v<decltype((p->*mm)(c)),               \
+                                         uco::task<void>>)                    \
+            {                                                                 \
+                co_return co_await (p->*mm)(c);                               \
+            }                                                                 \
+            else                                                              \
+            {                                                                 \
+                co_return co_await (p->*mm)(c)(c);                            \
+            }                                                                 \
+        }(ptr, m, ctx);                                                       \
     }
+
+// #define MakeHandler(obj, method)                                              \
+//     [ptr = &obj, m = &std::decay_t<decltype(obj)>::method]                    \
+//         (HttpContext *ctx) -> uco::task<void>                                 \
+//     {                                                                         \
+//         co_return co_await (ptr->*m)(ctx);                                    \
+//     }

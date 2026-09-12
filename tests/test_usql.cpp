@@ -1,3 +1,4 @@
+#include "core/uconfig.h"
 #include "core/ulog.h"
 #include "core/usql.h"
 #include "server/dao/user.pb.h"
@@ -76,15 +77,12 @@ task<void> demo3(usql::upool& pool)
 // 连接池正常用法.
 task<void> demo()
 {
-    usql::upool::config cfg;
-    cfg.host = "127.0.0.1";
-    cfg.user = "root";
-    cfg.pass = "123456";
-    cfg.db = "webserver";
-    cfg.max_size = 4;
-    cfg.reap_interval_ms = 2'000;
-    cfg.min_idle = 1;
-    auto&& pool = usql::upool(cfg);
+    uco::YamlConfig config;
+    if (!config.Load(PROJECT_SOURCE_DIR "/tests/pool_config.yaml"))
+    {
+        LOGFTL("failed to load tests/pool_config.yaml");
+    }
+    auto &&pool = usql::upool(config);
 
     cobatch batchrunner(5);
     batchrunner.add(demo1(pool));
