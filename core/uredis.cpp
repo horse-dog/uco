@@ -597,15 +597,26 @@ uco::task<uconnection *> upool::Acquire()
 {
     auto st = st_; // 协程帧持有状态所有权, 池析构也能安全完成.
 
+    // 登记与关闭检查必须在同一临界区，避免 Close 漏掉即将 wait 的 Acquire.
+    {
+        std::lock_guard<std::mutex> guard(st->mtx);
+        if (st->closed)
+        {
+            co_return nullptr;
+        }
+        ++st->pending_permit_waits;
+    }
+
     co_await st->permits.wait();
 
     uconnection *c = nullptr;
 
-    { // 复用空闲.
+    { // 注销登记并复用空闲.
         std::lock_guard<std::mutex> guard(st->mtx);
+        --st->pending_permit_waits;
         if (st->closed)
         {
-            st->permits.signal();
+            // Close 已为本次等待补入 permit，不能再次 signal.
             co_return nullptr;
         }
         if (!st->idle.empty())
@@ -677,21 +688,29 @@ void upool::Release(uconnection *c)
 
 void upool::Close()
 {
+    auto st = st_; // 保证唤醒流程及所有 signal 返回前状态持续存活.
+    size_t wake_count = 0;
     std::vector<uconnection *> victims;
     {
-        std::lock_guard<std::mutex> guard(st_->mtx);
-        if (st_->closed)
+        std::lock_guard<std::mutex> guard(st->mtx);
+        if (st->closed)
         {
             return;
         }
-        st_->closed = true;
+        st->closed = true;
+        wake_count = st->pending_permit_waits;
 
         // all 含借出中的连接.
-        victims.assign(st_->all.begin(), st_->all.end());
-        st_->all.clear();
-        st_->idle.clear();
+        victims.assign(st->all.begin(), st->all.end());
+        st->all.clear();
+        st->idle.clear();
     }
-    st_->waker.wake(); // 立即唤醒 reaper 使其感知关闭并退出.
+    // 每个已登记 Acquire 获得一个关闭许可，恢复后观察 closed 并返回 nullptr.
+    for (size_t i = 0; i < wake_count; ++i)
+    {
+        st->permits.signal();
+    }
+    st->waker.wake(); // 立即唤醒 reaper 使其感知关闭并退出.
     SYSMSG("uredis: pool close, conns:", victims.size());
     for (auto c : victims)
     {

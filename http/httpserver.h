@@ -17,6 +17,7 @@
 
 #include <google/protobuf/message.h>
 
+#include "core/thread_pool.h"
 #include "core/uco.h"
 #include "core/uconfig.h"
 #include "core/usync.h"
@@ -58,7 +59,8 @@ class HttpServer
      * @param sendtimeoutsec 发送响应的超时时间，单位秒。
      * @param resourceDir 静态资源目录。
      */
-    HttpServer(int port, int num_threads = 4, int keepalivecnt = 100,
+    HttpServer(uco::thread_pool& render_pool,
+               int port, int num_threads = 4, int keepalivecnt = 100,
                int keepalivesec = 60, int recvtimeoutsec = 10,
                int sendtimeoutsec = 10,
                const std::string &resourceDir = "res");
@@ -69,6 +71,7 @@ class HttpServer
      * @param prefix HTTP 配置节点前缀，默认读取 http.*。
      */
     explicit HttpServer(const uco::YamlConfig &config,
+                        uco::thread_pool& render_pool,
                         const std::string &prefix = "http");
     ~HttpServer();
     uco::task<void> Run();
@@ -175,6 +178,7 @@ class HttpServer
         int GetSendTimeout() const;
         int GetKeepAliveTimeout() const;
         int GetKeepAliveCount() const;
+        uco::thread_pool& GetRenderPool() const;
         std::string GetResourceDir() const;
         std::string GetErrorPagePath(int code) const;
         std::string GetErrorTemplatePath() const;
@@ -208,6 +212,7 @@ class HttpServer
     void setup_signalfd();
     uco::task<void> peek_exit();
     static HttpMethod HttpMethodStr2Enum(const std::string &method);
+    uco::thread_pool& GetRenderPool();
 
     int m_iPort = 0;
     int m_iNumThreads = 0;
@@ -224,6 +229,7 @@ class HttpServer
     std::map<std::pair<HttpMethod, std::string>, std::string> m_fwdDict; ///< (method, src) → dst.
     std::unordered_map<HttpMethod, PrefixTree> m_trees;
     std::unordered_map<int, std::string> m_mapErrorPagePath;
+    uco::thread_pool& m_htmlrender_pool;
 };
 
 /**

@@ -14,6 +14,7 @@
 #include <sys/stat.h> // stat
 #include <unistd.h>   // close
 
+#include "core/thread_pool.h"
 #include "core/uco.h"
 #include "core/ulog.h"
 #include "core/usync.h"
@@ -125,10 +126,11 @@ class StaticResourcePool
 class HttpResponse
 {
   public:
-    HttpResponse(int sendtimeout, int keepalivecount, int keepalivesec)
+    HttpResponse(int sendtimeout, int keepalivecount, int keepalivesec, uco::thread_pool& httprenderpool)
         : m_iSendTimeoutSec(sendtimeout), 
           m_iKeepAliveCount(keepalivecount), 
-          m_iKeepAliveTime(keepalivesec)
+          m_iKeepAliveTime(keepalivesec),
+          m_httprenderpool(httprenderpool)
     {
         Reset();
     }
@@ -146,7 +148,7 @@ class HttpResponse
     void GenHttpHeader();
     void ShouldGenErrorPage(int httpRetCode);
     uco::task<bool> GenHtmlTemplate(int fd, int size);
-    uco::task<void> GenErrorPage(int httpRetCode, const std::string &fullpath);
+    uco::task<bool> GenErrorPage(int httpRetCode, const std::string &fullpath);
     void GenErrorPageDefault(int httpRetCode);
 
     void AddHeader(const std::string &key, const std::string &value);
@@ -179,4 +181,5 @@ class HttpResponse
     std::string m_httpRspStaticResourcePath;
     uco::buffer m_httpRspHeaderBuffer;
     uco::buffer m_httpRspContentBuffer;
+    uco::thread_pool& m_httprenderpool;
 };

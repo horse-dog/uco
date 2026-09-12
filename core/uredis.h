@@ -181,7 +181,8 @@ class upool
         uint64_t reap_interval_sec = 60;
         uco_time_t ts = {10, 0};
         std::atomic<bool> closed{false};
-        std::mutex mtx;                 ///< 保护 idle/all (临界区内无 co_await).
+        std::mutex mtx; ///< 保护 pending_permit_waits/idle/all.
+        size_t pending_permit_waits = 0; ///< 已登记且尚未完成 wait 后处理的 Acquire.
         uco::usema permits;             ///< 槽位信号量, 容量 = max_size.
         std::deque<uconnection *> idle; ///< 空闲连接 (队首最老).
         std::set<uconnection *> all;    ///< 全部存活连接 (含借出中).

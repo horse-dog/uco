@@ -261,7 +261,7 @@ void HttpResponse::ShouldGenErrorPage(int httpRetCode)
     m_iHttpRetCode = httpRetCode;
 };
 
-uco::task<void> HttpResponse::
+uco::task<bool> HttpResponse::
 GenErrorPage(int httpRetCode, const std::string &fullpath)
 {
     m_httpRspStaticResourcePath.clear();
@@ -273,8 +273,7 @@ GenErrorPage(int httpRetCode, const std::string &fullpath)
     if (cache->first == -1)
     {
         LOGWRN("html template", fullpath, "not valid");
-        GenErrorPageDefault(httpRetCode);
-        co_return;
+        co_return false;
     }
     std::string buffer;
     buffer.resize(cache->second);
@@ -282,8 +281,8 @@ GenErrorPage(int httpRetCode, const std::string &fullpath)
         co_await uread(cache->first, buffer.data(), buffer.size(), 0, {10, 0});
     if (ret < 0)
     {
-        GenErrorPageDefault(httpRetCode);
-        co_return;
+        LOGERR("read template failed", NR(fullpath));
+        co_return false;
     }
 
     using namespace kainjow::mustache;
@@ -293,7 +292,17 @@ GenErrorPage(int httpRetCode, const std::string &fullpath)
     d.set("code", std::to_string(httpRetCode));
     d.set("message", httpRetCode2StatusString[httpRetCode]);
     m_httpRspContentBuffer.Reset();
-    m_httpRspContentBuffer.Append(tmpl.render(d));
+    std::string result;
+    ret = co_await m_httprenderpool.execute([&] {
+        result = tmpl.render(d);
+    });
+    if (ret != 0)
+    {
+        LOGERR("render error, ret:", ret);
+        co_return false;
+    }
+    m_httpRspContentBuffer.Append(result);
+    co_return true;
 }
 
 static kainjow::mustache::data
@@ -406,7 +415,16 @@ uco::task<bool> HttpResponse::GenHtmlTemplate(int fd, int size)
         }
     }
     m_httpRspContentBuffer.Reset();
-    m_httpRspContentBuffer.Append(tmpl.render(d));
+    std::string result;
+    ret = co_await m_httprenderpool.execute([&] {
+        result = tmpl.render(d);
+    });
+    if (ret != 0)
+    {
+        LOGERR("render error, ret:", ret);
+        co_return false;
+    }
+    m_httpRspContentBuffer.Append(result);
     co_return true;
 }
 

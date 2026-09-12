@@ -188,13 +188,14 @@ void PrepareDemo(HttpServer& httpserver)
 task<void> RunHttpServer(uco::YamlConfig app_config)
 {
     using namespace webserver;
-    // 1. 定义 server 实例.
-    HttpServer httpserver(app_config);
 
-    // 2. 定义 cpu 线程池.
+    // 1. 定义 cpu 线程池.
     size_t cpu_threads = app_config.Get<size_t>("cpu_pool.threads", 1);
     size_t cpu_max_pending = app_config.Get<size_t>("cpu_pool.max_pending", 32);
     uco::thread_pool thread_pool(cpu_threads, cpu_max_pending);
+
+    // 2. 定义 server 实例.
+    HttpServer httpserver(app_config, thread_pool);
 
     // 3. 定义密码哈希组件 (重 cpu 逻辑, 依赖注入 cpu 线程池).
     security::BcryptPasswordHasher hasher(thread_pool);

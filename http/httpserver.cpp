@@ -12,6 +12,7 @@
 #include <vector>
 #include <netinet/tcp.h>
 
+#include "core/thread_pool.h"
 #include "core/usync.h"
 #include "http/httpconnection.h"
 #include "http/httprequest.h"
@@ -631,6 +632,15 @@ int HttpServer::HttpServerInstance::GetKeepAliveCount() const
     return m_manager->m_iKeepAliveCount;
 }
 
+uco::thread_pool& HttpServer::HttpServerInstance::GetRenderPool() const
+{
+    if (m_manager == nullptr)
+    {
+        SYSFTL("no manager");
+    }
+    return m_manager->GetRenderPool();
+}
+
 std::string HttpServer::HttpServerInstance::GetResourceDir() const
 {
     if (m_manager == nullptr)
@@ -800,10 +810,12 @@ HttpServer::~HttpServer()
 
 // 构造即配置 (原两阶段 Init 收编, Init 保留为私有实现).
 HttpServer::HttpServer(const uco::YamlConfig &config,
+                       uco::thread_pool& render_pool,
                        const std::string &prefix)
     : HttpServer(
+          render_pool,
           config.Get<int>(prefix + ".port", 8080),
-          config.Get<int>(prefix + ".worker_threads", 4),
+          config.Get<int>(prefix + ".worker_threads", std::thread::hardware_concurrency()),
           config.Get<int>(prefix + ".keepalive_max_requests", 100),
           config.Get<int>(prefix + ".keepalive_timeout_sec", 60),
           config.Get<int>(prefix + ".recv_timeout_sec", 10),
@@ -813,9 +825,11 @@ HttpServer::HttpServer(const uco::YamlConfig &config,
     {
     }
 
-HttpServer::HttpServer(int port, int num_threads, int keepalivecnt,
+HttpServer::HttpServer(uco::thread_pool& render_pool,
+                       int port, int num_threads, int keepalivecnt,
                        int keepalivesec, int recvtimeoutsec,
                        int sendtimeoutsec, const std::string &resourceDir)
+: m_htmlrender_pool(render_pool)
 {
     if (num_threads <= 0)
     {
@@ -992,6 +1006,11 @@ HttpMethod HttpServer::HttpMethodStr2Enum(const std::string &method)
         return it->second;
     }
     return HttpMethod::eGet;
+}
+
+uco::thread_pool& HttpServer::GetRenderPool()
+{
+    return m_htmlrender_pool;
 }
 
 ///////////////////////

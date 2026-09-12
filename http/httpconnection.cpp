@@ -154,7 +154,10 @@ HttpConnection::HttpConnection(int sock, sockaddr_in &addr,
                                HttpServer::HttpServerInstance *server)
     : m_iSocket(sock), m_sockAddr(addr), m_pHttpServer(server),
       m_httpRequest(server->GetRecvTimeout()),
-      m_httpResponse(server->GetSendTimeout(), server->GetKeepAliveCount(), server->GetKeepAliveTimeout())
+      m_httpResponse(
+          server->GetSendTimeout(), server->GetKeepAliveCount(),
+          server->GetKeepAliveTimeout(), server->GetRenderPool()
+      )
 {
 }
 
@@ -371,14 +374,19 @@ uco::task<void> HttpConnection::GenErrorPage(int code)
 
     // if static html not exists, use template if exist.
     auto sTemplatePath = m_pHttpServer->GetErrorTemplatePath();
-    if (sTemplatePath.empty())
+    if (!sTemplatePath.empty())
     {
-        // use hardcode error.
-        m_httpResponse.GenErrorPageDefault(code);
-        co_return;
+        sTemplatePath = path_join(m_pHttpServer->GetResourceDir(), sTemplatePath);
+        bool success = co_await m_httpResponse.GenErrorPage(code, sTemplatePath);
+        if (success)
+        {
+            co_return;
+        }
     }
-    sTemplatePath = path_join(m_pHttpServer->GetResourceDir(), sTemplatePath);
-    co_await m_httpResponse.GenErrorPage(code, sTemplatePath);
+
+    // use hardcode error.
+    m_httpResponse.GenErrorPageDefault(code);
+    co_return;
 }
 
 static bool isSafePath(const std::string &urlPath)

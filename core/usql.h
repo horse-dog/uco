@@ -302,7 +302,8 @@ class upool
         bool use_ssl = false;
         uco_time_t ts = {10, 0};
         std::atomic<bool> closed{false};
-        std::mutex mtx;              ///< 保护 idle/all (临界区内无 co_await).
+        std::mutex mtx; ///< 保护 pending_permit_waits/idle/all.
+        size_t pending_permit_waits = 0; ///< 已登记且尚未完成 wait 后处理的 Acquire.
         uco::usema permits;          ///< 槽位信号量, 容量 = max_size.
         std::deque<MYSQL *> idle;    ///< 空闲连接 (队首最老).
         std::set<MYSQL *> all;       ///< 全部存活连接 (含借出中).

@@ -736,6 +736,7 @@ void usema::__kill_broadcast()
         std::__terminate();
     }
     pWaiter = nullptr;
+    nwait.store(0);
     auto waiters = wq->take_all();
     LOCK->unlock();
     delete wq;

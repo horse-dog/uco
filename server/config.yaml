@@ -5,7 +5,7 @@ module_name: "ucohttpsvr"
 
 logging:
   # 最低日志级别：0=DEBUG，1=INFO，2=WARN，3=ERROR，4=FATAL。
-  level: 1
+  level: 2
   # 日志输出方式：0=CONSOLE，1=FILE。
   mode: 0
   # 是否输出框架内部系统日志；业务 ERROR/FATAL 不受此开关影响。
