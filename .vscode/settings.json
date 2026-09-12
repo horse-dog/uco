@@ -1,9 +1,11 @@
 {
     "C_Cpp.intelliSenseEngine": "disabled",
     "cmake.generator": "Unix Makefiles",
+    "clangd.path": "${workspaceFolder}/tools/clang-tidy/uco-clangd",
     "clangd.onConfigChanged": "restart",
     "clangd.arguments": [
         "--compile-commands-dir=${workspaceFolder}/build",
+        "--clang-tidy",
         "--all-scopes-completion",
         "--completion-style=detailed",
         "--pch-storage=disk",

@@ -2,7 +2,51 @@ cmake_minimum_required(VERSION 3.20)
 project(uco)
 
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+# 可选开发工具：构建 UCO clang-tidy 动态插件，以及静态注册该检查的
+# 定制 clangd。它们不属于项目运行时依赖，缺少工具链时不得影响正常构建。
+option(UCO_BUILD_CLANG_TIDY_PLUGIN
+       "Build the UCO project-specific clang-tidy plugin and clangd" ON)
+if(UCO_BUILD_CLANG_TIDY_PLUGIN)
+  set(UCO_CLANG_TIDY_DEPS_FOUND TRUE)
+
+  # Ubuntu 的 LLVM/Clang CMake 包通常安装在此路径；QUIET 保证未安装
+  # 开发包时仅跳过自定义工具，不产生配置错误。
+  find_package(LLVM 18.1 QUIET CONFIG
+               HINTS /usr/lib/llvm-18/lib/cmake/llvm)
+  if(LLVM_FOUND)
+    find_package(Clang 18.1 QUIET CONFIG
+                 HINTS /usr/lib/llvm-18/lib/cmake/clang)
+  endif()
+
+  # 动态检查插件需要 clangTidy/ASTMatchers；定制 clangd 还需要
+  # clangdMain。通过目标存在性判断 Clang 开发包是否完整。
+  foreach(DEP_TARGET clangTidy clangASTMatchers clangdMain)
+    if(NOT TARGET ${DEP_TARGET})
+      set(UCO_CLANG_TIDY_DEPS_FOUND FALSE)
+    endif()
+  endforeach()
+
+  # Ubuntu 导出的 clangdMain 目标会链接远程索引代码，因此还要求这些
+  # 系统库。全部静默探测，任一缺失时跳过整个自定义工具目录。
+  foreach(DEP_LIBRARY protobuf gpr grpc grpc++ absl_synchronization)
+    string(MAKE_C_IDENTIFIER "${DEP_LIBRARY}" DEP_ID)
+    find_library(UCO_CLANG_TIDY_${DEP_ID}_LIBRARY NAMES ${DEP_LIBRARY})
+    if(NOT UCO_CLANG_TIDY_${DEP_ID}_LIBRARY)
+      set(UCO_CLANG_TIDY_DEPS_FOUND FALSE)
+    endif()
+  endforeach()
+
+  if(UCO_CLANG_TIDY_DEPS_FOUND)
+    add_subdirectory(tools/clang-tidy)
+  else()
+    # 开关即使为 ON，依赖缺失也只提示，不中止项目配置或普通目标构建。
+    message(STATUS
+            "clang-tidy/clangd dependencies not found; custom tooling disabled")
+  endif()
+endif()
 
 find_package(Protobuf REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)

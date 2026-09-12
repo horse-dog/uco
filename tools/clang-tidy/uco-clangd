@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -e
+
+# VS Code 的 clangd.path 固定指向本脚本，避免自定义 clangd 未构建时
+# 语言服务无法启动。所有 clangd 参数均通过 "$@" 原样转发。
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+custom_clangd="${project_root}/build/uco-clangd"
+
+# 优先使用静态注册了 UCO 自定义 clang-tidy 检查的项目版本。
+if [[ -x "${custom_clangd}" ]]; then
+    exec "${custom_clangd}" "$@"
+fi
+
+# 自定义版本不存在时，优先回退到与项目工具链一致的 clangd 18。
+if [[ -x /usr/bin/clangd-18 ]]; then
+    exec /usr/bin/clangd-18 "$@"
+fi
+
+# 最后尝试 PATH 中的系统 clangd。回退版本不包含 UCO 自定义检查，
+# 但仍能提供补全、跳转和普通编译诊断。
+if command -v clangd >/dev/null 2>&1; then
+    exec clangd "$@"
+fi
+
+echo "uco-clangd: neither the custom clangd nor a system clangd was found" >&2
+exit 127

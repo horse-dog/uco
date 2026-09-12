@@ -1,0 +1,2 @@
+Checks: '-*,uco-discarded-coawait-lock'
+WarningsAsErrors: ''
