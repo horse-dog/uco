@@ -458,7 +458,7 @@ uco::task<void> HttpConnection::HandleRequest(std::string &sErrMsg, bool& bLog)
     {
         m_httpRequest.m_sPath.pop_back();
         m_httpResponse.SetHttpRetCode(301);
-        m_httpResponse.AddHeader("Location", m_httpRequest.m_sPath);
+        m_httpResponse.SetHeader("Location", m_httpRequest.m_sPath);
         co_return;
     }
 
@@ -567,8 +567,8 @@ uco::task<void> HttpConnection::HandleRequest(std::string &sErrMsg, bool& bLog)
                             m_httpResponse.m_iPartialTo,
                             m_httpResponse.m_iPartialFrom + chunksz - 1);
 
-                        m_httpResponse.AddHeader("Accept-Ranges", "bytes");
-                        m_httpResponse.AddHeader(
+                        m_httpResponse.SetHeader("Accept-Ranges", "bytes");
+                        m_httpResponse.SetHeader(
                             "Content-Range",
                             "bytes " +
                                 std::to_string(m_httpResponse.m_iPartialFrom) +

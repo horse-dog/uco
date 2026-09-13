@@ -206,7 +206,7 @@ void HttpContext::SetHeader(const std::string &key, const std::string &value)
 {
     if (m_ptrRsp)
     {
-        m_ptrRsp->AddHeader(key, value);
+        m_ptrRsp->SetHeader(key, value);
     }
 }
 
@@ -252,18 +252,7 @@ std::string HttpContext::GetHeader(const std::string &key) const
     if (m_ptrReq == nullptr) return "";
     for (const auto &[name, value] : m_ptrReq->m_mapHeader)
     {
-        if (name.size() != key.size()) continue;
-        bool equal = true;
-        for (size_t i = 0; i < name.size(); ++i)
-        {
-            if (std::tolower(static_cast<unsigned char>(name[i])) !=
-                std::tolower(static_cast<unsigned char>(key[i])))
-            {
-                equal = false;
-                break;
-            }
-        }
-        if (equal) return value;
+        if (uco::EqualsIgnoreCase(name, key)) return value;
     }
     return "";
 }
@@ -363,7 +352,10 @@ void HttpContext::SetCookie(const std::string &name, const std::string &value,
         break; // 未设置: 不输出.
     }
 
-    SetHeader("Set-Cookie", std::move(c));
+    if (m_ptrRsp)
+    {
+        m_ptrRsp->SetHeader("Set-Cookie", c);
+    }
 }
 
 std::string HttpContext::GetRawData()
@@ -472,39 +464,72 @@ static bool parse_urlencoded(std::string_view body,
     return !fields.empty();
 }
 
-bool HttpContext::ShouldBindForm(
-    std::unordered_map<std::string, std::string> &fields, size_t max_body_size)
+const HttpContext::FormFields *
+HttpContext::ShouldBindForm(size_t max_body_size)
 {
-    if (m_ptrReq == nullptr) return false;
+    // 已成功解析时直接复用缓存，但每个调用方自己的大小上限仍然生效。
+    if (m_eFormState == FormState::eValid)
+    {
+        return m_iFormBodySize <= max_body_size ? &m_mapFormFields : nullptr;
+    }
+    // 首次解析失败后不再用已消费或可能变化的请求缓冲区重试。
+    if (m_eFormState == FormState::eInvalid || m_ptrReq == nullptr)
+    {
+        return nullptr;
+    }
 
     const std::string_view body = PeekRawData();
+    m_iFormBodySize = body.size();
     if (body.empty())
     {
         LOGERR("empty body");
-        return false;
+        m_eFormState = FormState::eInvalid;
+        return nullptr;
     }
-    else if (body.size() > max_body_size)
+    if (body.size() > max_body_size)
     {
         LOGERR(body.size(), max_body_size);
-        return false;
+        m_eFormState = FormState::eInvalid;
+        return nullptr;
     }
-    if (!parse_urlencoded(body, fields))
+    if (!parse_urlencoded(body, m_mapFormFields))
     {
         LOGERR("parse error", NR(body));
+        m_eFormState = FormState::eInvalid;
+        return nullptr;
+    }
+
+    // 解析结果已归 HttpContext 所有，原始 body 只需消费一次。
+    m_ptrReq->m_buffer.Retrieve(m_ptrReq->m_iHttpRequsetContentLength);
+    m_eFormState = FormState::eValid;
+    return &m_mapFormFields;
+}
+
+bool HttpContext::ShouldBindForm(FormFields &fields, size_t max_body_size)
+{
+    const FormFields *cached = ShouldBindForm(max_body_size);
+    if (cached == nullptr)
+    {
         return false;
     }
-    m_ptrReq->m_buffer.Retrieve(m_ptrReq->m_iHttpRequsetContentLength);
+    fields = *cached;
     return true;
 }
 
-void HttpContext::BindForm(std::unordered_map<std::string, std::string> &fields,
-                           size_t max_body_size)
+const HttpContext::FormFields &HttpContext::BindForm(size_t max_body_size)
 {
-    if (!ShouldBindForm(fields, max_body_size))
+    const FormFields *cached = ShouldBindForm(max_body_size);
+    if (cached == nullptr)
     {
         Status(400);
         Abort("BindForm");
     }
+    return *cached;
+}
+
+void HttpContext::BindForm(FormFields &fields, size_t max_body_size)
+{
+    fields = BindForm(max_body_size);
 }
 
 uco::task<void> HttpContext::Next()
@@ -887,6 +912,41 @@ void HttpServer::Forward(HttpMethod method, const std::string &src,
     m_fwdDict[{method, src}] = dst;
 }
 
+std::string HttpServer::RouteGroup::JoinPath(const std::string &prefix,
+                                             const std::string &path)
+{
+    std::string base = prefix;
+    if (!base.empty() && base.front() != '/')
+    {
+        base.insert(base.begin(), '/');
+    }
+    while (base.size() > 1 && base.back() == '/')
+    {
+        base.pop_back();
+    }
+
+    size_t path_begin = 0;
+    while (path_begin < path.size() && path[path_begin] == '/')
+    {
+        ++path_begin;
+    }
+    if (path_begin == path.size())
+    {
+        return base.empty() ? "/" : base;
+    }
+    if (base.empty() || base == "/")
+    {
+        return "/" + path.substr(path_begin);
+    }
+    return base + "/" + path.substr(path_begin);
+}
+
+void HttpServer::AddRoute(HttpMethod method, const std::string &path,
+                          std::vector<HandleFunc> handles)
+{
+    m_trees[method].insert(path, std::move(handles));
+}
+
 static uco::task<void> default_handle(HttpContext *context)
 {
     context->DisableLog();
@@ -894,9 +954,34 @@ static uco::task<void> default_handle(HttpContext *context)
     co_return;
 }
 
+void HttpServer::AddStaticRoute(const std::string &path,
+                                std::vector<HandleFunc> middleware)
+{
+    middleware.emplace_back(default_handle);
+    AddRoute(eGet, path, std::move(middleware));
+}
+
 void HttpServer::Static(const std::string &path)
 {
-    m_trees[eGet].insert(path, default_handle);
+    AddStaticRoute(path, {});
+}
+
+void HttpServer::RouteGroup::Static(const std::string &path) const
+{
+    m_server->AddStaticRoute(JoinPath(m_prefix, path), m_middleware);
+}
+
+HttpServer::HandleFunc CacheControl(std::string value)
+{
+    if (value.empty())
+    {
+        value = "no-cache";
+    }
+    return [value = std::move(value)](HttpContext *context) -> uco::task<void> {
+        // 在链首设置，后续中间件即使提前 Abort，响应仍携带该策略。
+        context->SetHeader("Cache-Control", value);
+        co_return;
+    };
 }
 
 void HttpServer::ErrorTemplate(const std::string &error_html_template)
@@ -918,8 +1003,7 @@ HttpServer::find_handles(HttpMethod method, const std::string &path)
     auto it = m_trees.find(method);
     if (it != m_trees.end())
     {
-        auto &&trie = it->second;
-        trie.match(path, handles, params);
+        it->second.match(path, handles, params);
     }
     return {handles, params};
 }

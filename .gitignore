@@ -1,5 +1,7 @@
 gen
 log
 build
+build-debug
+build-release
 test.*
 todo.md

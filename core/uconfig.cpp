@@ -1,8 +1,11 @@
 #include "core/uconfig.h"
+#include "core/ulog.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <charconv>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <string_view>
 #include <utility>
@@ -139,6 +142,9 @@ bool YamlConfig::Load(const std::string &path) noexcept
         std::ifstream input(path);
         if (!input)
         {
+            const int error = errno;
+            SYSERR("YamlConfig: failed to open file, path:", path,
+                   "errno:", error, "msg:", std::strerror(error));
             m_values.clear();
             return false;
         }
@@ -218,6 +224,14 @@ bool YamlConfig::Load(const std::string &path) noexcept
                 return false;
             }
         }
+        if (input.bad())
+        {
+            const int error = errno;
+            SYSERR("YamlConfig: failed to read file, path:", path,
+                   "errno:", error, "msg:", std::strerror(error));
+            m_values.clear();
+            return false;
+        }
         *this = std::move(loaded);
         return true;
     }
@@ -233,6 +247,18 @@ bool YamlConfig::Contains(const std::string &key) const noexcept
     return m_values.contains(key);
 }
 
+void YamlConfig::LogReadError(const std::string &key,
+                              const char *reason) noexcept
+{
+    try
+    {
+        SYSERR("YamlConfig: failed to read key:", key, "reason:", reason);
+    }
+    catch (...)
+    {
+    }
+}
+
 bool YamlConfig::TryGetString(const std::string &key,
                               std::string &value) const noexcept
 {
@@ -241,6 +267,7 @@ bool YamlConfig::TryGetString(const std::string &key,
         const auto it = m_values.find(key);
         if (it == m_values.end())
         {
+            LogReadError(key, "key not found");
             return false;
         }
         value = it->second;
@@ -248,6 +275,7 @@ bool YamlConfig::TryGetString(const std::string &key,
     }
     catch (...)
     {
+        LogReadError(key, "exception while reading string");
         return false;
     }
 }
@@ -294,20 +322,47 @@ bool YamlConfig::TryGetInt(const std::string &key,
                            std::int64_t &value) const noexcept
 {
     std::string text;
-    return TryGetString(key, text) && TryParseInt(text, value);
+    if (!TryGetString(key, text))
+    {
+        return false;
+    }
+    if (!TryParseInt(text, value))
+    {
+        LogReadError(key, "signed integer type mismatch");
+        return false;
+    }
+    return true;
 }
 
 bool YamlConfig::TryGetUInt(const std::string &key,
                             std::uint64_t &value) const noexcept
 {
     std::string text;
-    return TryGetString(key, text) && TryParseUInt(text, value);
+    if (!TryGetString(key, text))
+    {
+        return false;
+    }
+    if (!TryParseUInt(text, value))
+    {
+        LogReadError(key, "unsigned integer type mismatch");
+        return false;
+    }
+    return true;
 }
 
 bool YamlConfig::TryGetBool(const std::string &key, bool &value) const noexcept
 {
     std::string text;
-    return TryGetString(key, text) && TryParseBool(std::move(text), value);
+    if (!TryGetString(key, text))
+    {
+        return false;
+    }
+    if (!TryParseBool(std::move(text), value))
+    {
+        LogReadError(key, "boolean type mismatch");
+        return false;
+    }
+    return true;
 }
 
 bool YamlConfig::TryGetRawList(const std::string &key,
@@ -324,6 +379,7 @@ bool YamlConfig::TryGetRawList(const std::string &key,
         std::string_view value = Trim(text);
         if (value.size() < 2 || value.front() != '[' || value.back() != ']')
         {
+            LogReadError(key, "list type mismatch");
             return false;
         }
 
@@ -338,11 +394,13 @@ bool YamlConfig::TryGetRawList(const std::string &key,
                                               : value.substr(0, comma);
             if (Trim(item).empty())
             {
+                LogReadError(key, "empty list element");
                 return false;
             }
             std::string parsed;
             if (!Unquote(item, parsed))
             {
+                LogReadError(key, "invalid quoted list element");
                 return false;
             }
             result.push_back(std::move(parsed));
@@ -356,6 +414,7 @@ bool YamlConfig::TryGetRawList(const std::string &key,
     }
     catch (...)
     {
+        LogReadError(key, "exception while reading list");
         return false;
     }
 }

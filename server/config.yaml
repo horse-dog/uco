@@ -111,10 +111,10 @@ rate_limit:
   # 所有限流中间件使用的固定窗口长度（秒）。
   window_sec: 60
   # 每次调用 ByIP() 创建的独立中间件按客户端 IP 的请求上限。
-  ip_per_window: 256
+  ip_per_window: 1024
   # ByNewSessionIP() 对新建匿名 session 按客户端 IP 的请求上限。
-  new_session_ip_per_window: 30
+  new_session_ip_per_window: 64
   # 每次调用 BySession() 创建的独立中间件按 Session ID 的请求上限。
-  session_per_window: 10
+  session_per_window: 32
   # 每次调用 ByAccount() 创建的独立中间件按账号的请求上限。
-  account_per_window: 10
+  account_per_window: 16

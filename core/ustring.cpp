@@ -1,8 +1,7 @@
 #include "core/ustring.h"
 
+#include <charconv>
 #include <cctype>
-#include <cerrno>
-#include <cstdlib>
 #include <utility>
 
 namespace uco
@@ -22,21 +21,21 @@ namespace uco
         return -1;
     }
 
-    std::string Trim(const std::string &s, const std::string &chars)
+    std::string Trim(std::string_view s, std::string_view chars)
     {
         size_t b = 0, e = s.size();
-        while (b < e && chars.find(s[b]) != std::string::npos)
+        while (b < e && chars.find(s[b]) != std::string_view::npos)
         {
             b++;
         }
-        while (e > b && chars.find(s[e - 1]) != std::string::npos)
+        while (e > b && chars.find(s[e - 1]) != std::string_view::npos)
         {
             e--;
         }
-        return s.substr(b, e - b);
+        return std::string(s.substr(b, e - b));
     }
 
-    std::string ToLower(const std::string &s)
+    std::string ToLower(std::string_view s)
     {
         std::string out(s);
         for (char &c : out)
@@ -46,7 +45,7 @@ namespace uco
         return out;
     }
 
-    std::string ToUpper(const std::string &s)
+    std::string ToUpper(std::string_view s)
     {
         std::string out(s);
         for (char &c : out)
@@ -56,7 +55,7 @@ namespace uco
         return out;
     }
 
-    bool EqualsIgnoreCase(const std::string &a, const std::string &b)
+    bool EqualsIgnoreCase(std::string_view a, std::string_view b)
     {
         if (a.size() != b.size())
         {
@@ -73,24 +72,22 @@ namespace uco
         return true;
     }
 
-    bool StartsWith(const std::string &s, const std::string &prefix)
+    bool StartsWith(std::string_view s, std::string_view prefix)
     {
-        return s.size() >= prefix.size() &&
-               s.compare(0, prefix.size(), prefix) == 0;
+        return s.starts_with(prefix);
     }
 
-    bool EndsWith(const std::string &s, const std::string &suffix)
+    bool EndsWith(std::string_view s, std::string_view suffix)
     {
-        return s.size() >= suffix.size() &&
-               s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+        return s.ends_with(suffix);
     }
 
-    bool Contains(const std::string &s, const std::string &sub)
+    bool Contains(std::string_view s, std::string_view sub)
     {
-        return s.find(sub) != std::string::npos;
+        return s.find(sub) != std::string_view::npos;
     }
 
-    std::vector<std::string> Split(const std::string &s, char delim,
+    std::vector<std::string> Split(std::string_view s, char delim,
                                    SplitOpt opt)
     {
         std::vector<std::string> parts;
@@ -98,14 +95,13 @@ namespace uco
         while (true)
         {
             const size_t pos = s.find(delim, start);
-            std::string part = (pos == std::string::npos)
-                                   ? s.substr(start)
-                                   : s.substr(start, pos - start);
-            if ((opt & SplitOpt::kTrim) != SplitOpt::kNone)
-            {
-                part = Trim(part);
-            }
-            const bool last = (pos == std::string::npos);
+            const std::string_view part_view =
+                pos == std::string_view::npos ? s.substr(start)
+                                              : s.substr(start, pos - start);
+            std::string part = (opt & SplitOpt::kTrim) != SplitOpt::kNone
+                                   ? Trim(part_view)
+                                   : std::string(part_view);
+            const bool last = pos == std::string_view::npos;
             if ((opt & SplitOpt::kSkipEmpty) != SplitOpt::kNone && part.empty())
             {
                 if (last)
@@ -126,45 +122,46 @@ namespace uco
     }
 
     std::string Join(const std::vector<std::string> &parts,
-                     const std::string &delim)
+                     std::string_view delim)
     {
         std::string out;
         for (size_t i = 0; i < parts.size(); ++i)
         {
             if (i > 0)
             {
-                out += delim;
+                out.append(delim);
             }
             out += parts[i];
         }
         return out;
     }
 
-    std::string ReplaceAll(const std::string &s, const std::string &from,
-                           const std::string &to)
+    std::string ReplaceAll(std::string_view s, std::string_view from,
+                           std::string_view to)
     {
         if (from.empty())
         {
-            return s;
+            return std::string(s);
         }
         std::string out;
+        out.reserve(s.size());
         size_t start = 0;
         while (true)
         {
             const size_t pos = s.find(from, start);
-            if (pos == std::string::npos)
+            if (pos == std::string_view::npos)
             {
                 break;
             }
-            out.append(s, start, pos - start);
-            out += to;
+            out.append(s.substr(start, pos - start));
+            out.append(to);
             start = pos + from.size();
         }
-        out.append(s, start, std::string::npos);
+        out.append(s.substr(start));
         return out;
     }
 
-    std::string HexEncode(const std::string &data)
+    std::string HexEncode(std::string_view data)
     {
         static const char *kHex = "0123456789abcdef";
         std::string out;
@@ -177,7 +174,7 @@ namespace uco
         return out;
     }
 
-    bool HexDecode(const std::string &hex, std::string &out)
+    bool HexDecode(std::string_view hex, std::string &out)
     {
         if (hex.size() % 2 != 0)
         {
@@ -199,7 +196,7 @@ namespace uco
         return true;
     }
 
-    bool StrToInt32(const std::string &s, int32_t &out)
+    bool StrToInt32(std::string_view s, int32_t &out)
     {
         int64_t v = 0;
         if (!StrToInt64(s, v) || v < INT32_MIN || v > INT32_MAX)
@@ -210,7 +207,7 @@ namespace uco
         return true;
     }
 
-    bool StrToUint32(const std::string &s, uint32_t &out)
+    bool StrToUint32(std::string_view s, uint32_t &out)
     {
         uint64_t v = 0;
         if (!StrToUint64(s, v) || v > UINT32_MAX)
@@ -221,42 +218,59 @@ namespace uco
         return true;
     }
 
-    bool StrToInt64(const std::string &s, int64_t &out)
+    bool StrToInt64(std::string_view s, int64_t &out)
     {
         if (s.empty())
         {
             return false;
         }
-        errno = 0;
-        char *end = nullptr;
-        const long long v = std::strtoll(s.c_str(), &end, 10);
-        if (errno != 0 || end == nullptr || *end != '\0')
+        if (s.front() == '+')
+        {
+            s.remove_prefix(1);
+            if (s.empty())
+            {
+                return false;
+            }
+        }
+
+        int64_t value = 0;
+        const char *end = s.data() + s.size();
+        const auto parsed = std::from_chars(s.data(), end, value, 10);
+        if (parsed.ec != std::errc() || parsed.ptr != end)
         {
             return false;
         }
-        out = (int64_t)v;
+        out = value;
         return true;
     }
 
-    bool StrToUint64(const std::string &s, uint64_t &out)
+    bool StrToUint64(std::string_view s, uint64_t &out)
     {
-        // strtoull 会把 "-1" 折成大数, 显式拒绝负号.
-        if (s.empty() || s[0] == '-')
+        if (s.empty() || s.front() == '-')
         {
             return false;
         }
-        errno = 0;
-        char *end = nullptr;
-        const unsigned long long v = std::strtoull(s.c_str(), &end, 10);
-        if (errno != 0 || end == nullptr || *end != '\0')
+        if (s.front() == '+')
+        {
+            s.remove_prefix(1);
+            if (s.empty())
+            {
+                return false;
+            }
+        }
+
+        uint64_t value = 0;
+        const char *end = s.data() + s.size();
+        const auto parsed = std::from_chars(s.data(), end, value, 10);
+        if (parsed.ec != std::errc() || parsed.ptr != end)
         {
             return false;
         }
-        out = (uint64_t)v;
+        out = value;
         return true;
     }
 
-    std::string UrlEncode(const std::string &value)
+    std::string UrlEncode(std::string_view value)
     {
         static const char *kHex = "0123456789ABCDEF";
         std::string out;
@@ -277,7 +291,7 @@ namespace uco
         return out;
     }
 
-    std::string UrlDecode(const std::string &value, bool plus_as_space)
+    std::string UrlDecode(std::string_view value, bool plus_as_space)
     {
         std::string result;
         result.reserve(value.size());

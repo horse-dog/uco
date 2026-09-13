@@ -149,7 +149,7 @@ class HttpResponse
     uco::task<void> GenErrorPage(int httpRetCode, const std::string &fullpath);
     void GenErrorPageDefault(int httpRetCode);
 
-    void AddHeader(const std::string &key, const std::string &value);
+    void SetHeader(const std::string &key, const std::string &value);
 
     void write(const std::string &__msg)
     {

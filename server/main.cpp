@@ -134,55 +134,65 @@ task<void> post(HttpContext *context)
     co_return;
 }
 
-void PrepareStaticResource(HttpServer& httpserver)
+void PrepareStaticResource(HttpServer& svr)
 {
-    // 静态资源.
-    httpserver.Static("/css/*");
-    httpserver.Static("/fonts/*filename");
-    httpserver.Static("/images/*filename");
-    httpserver.Static("/js/*filename");
-    httpserver.Static("/video/*filename");
-    httpserver.Static("/music/*filename");
+    {
+        auto g = svr.Group("", CacheControl("public, max-age=3600"));
+        g.Static("/css/*");
+        g.Static("/fonts/*filename");
+        g.Static("/images/*filename");
+        g.Static("/js/*filename");
+    }
 
-    // 静态页面.
-    httpserver.Static("/index.html");
-    httpserver.Static("/video.html");
-    httpserver.Static("/picture.html");
+    {
+        auto g = svr.Group("", CacheControl("public, max-age=86400"));
+        g.Static("/video/*filename");
+        g.Static("/music/*filename");
+    }
+
+    {
+        // HTML 需要及时获取新版本，允许存储但每次使用前必须验证。
+        auto g = svr.Group("", CacheControl("no-cache"));
+        g.Static("/index.html");
+        g.Static("/video.html");
+        g.Static("/picture.html");
+    }
 }
 
-void PrepareForward(HttpServer& httpserver)
+void PrepareForward(HttpServer& svr)
 {
-    httpserver.Forward(eGet, "/", "/index.html");
-    httpserver.Forward(eGet, "/index", "/index.html");
-    httpserver.Forward(eGet, "/video", "/video.html");
-    httpserver.Forward(eGet, "/picture", "/picture.html");
+    svr.Forward(eGet, "/", "/index.html");
+    svr.Forward(eGet, "/index", "/index.html");
+    svr.Forward(eGet, "/video", "/video.html");
+    svr.Forward(eGet, "/picture", "/picture.html");
     // 直链 .html 一律经动态路由 (登录态检查), 防绕过.
-    httpserver.Forward(eGet, "/login.html", "/login");
-    httpserver.Forward(eGet, "/register.html", "/register");
-    httpserver.Forward(eGet, "/welcome.html", "/welcome");
+    svr.Forward(eGet, "/login.html", "/login");
+    svr.Forward(eGet, "/register.html", "/register");
+    svr.Forward(eGet, "/welcome.html", "/welcome");
 }
 
-void PrepareErrorPage(HttpServer& httpserver)
+void PrepareErrorPage(HttpServer& svr)
 {
     // 静态错误页面.
-    httpserver.ErrorPage(400, "400.html");
-    httpserver.ErrorPage(403, "403.html");
-    httpserver.ErrorPage(404, "404.html");
-    httpserver.ErrorPage(500, "500.html");
+    svr.ErrorPage(400, "400.html");
+    svr.ErrorPage(403, "403.html");
+    svr.ErrorPage(404, "404.html");
+    svr.ErrorPage(500, "500.html");
 
     // 通用错误模板.
-    httpserver.ErrorTemplate("templates/error.html");
+    svr.ErrorTemplate("templates/error.html");
 }
 
-void PrepareDemo(HttpServer& httpserver)
+void PrepareDemo(HttpServer& svr)
 {
-    httpserver.GET("/hello", middleware1, middleware2, middleware3, hello);
-    httpserver.GET("/redirect", redirect);
-    httpserver.GET("/status", status_page);
-    httpserver.GET("/ping", ping);
-    httpserver.GET("/template", template_page);
-    httpserver.HEAD("/head", head);
-    httpserver.POST("/post", post);
+    auto dynamic = svr.Group("", CacheControl("no-cache"));
+    dynamic.GET("/hello", middleware1, middleware2, middleware3, hello);
+    dynamic.GET("/redirect", redirect);
+    dynamic.GET("/status", status_page);
+    dynamic.GET("/ping", ping);
+    dynamic.GET("/template", template_page);
+    dynamic.HEAD("/head", head);
+    dynamic.POST("/post", post);
 }
 
 task<void> RunHttpServer(uco::YamlConfig app_config)
@@ -190,7 +200,7 @@ task<void> RunHttpServer(uco::YamlConfig app_config)
     using namespace webserver;
 
     // 1. 定义 server 实例.
-    HttpServer httpserver(app_config);
+    HttpServer svr(app_config);
 
     // 2. 定义 cpu 线程池.
     size_t cpu_threads = app_config.Get<size_t>("cpu_pool.threads", 1);
@@ -223,65 +233,52 @@ task<void> RunHttpServer(uco::YamlConfig app_config)
     controller::UserController userController(userService);
 
     // 11. 定义业务接口.
-    PrepareStaticResource(httpserver);
-    PrepareForward(httpserver);
-    PrepareErrorPage(httpserver);
-    PrepareDemo(httpserver);
+    PrepareStaticResource(svr);
+    PrepareForward(svr);
+    PrepareErrorPage(svr);
+    PrepareDemo(svr);
 
-    httpserver.GET(
+    // 会话及认证相关响应（包括中间件提前返回的 4xx）均禁止存储。
+    auto baseGrp = svr.Group(
+        "",
+        CacheControl("private, no-store"),
+        MakeHandler(store, Sessions)
+    );
+    auto postGrp = baseGrp.Group(
+        "", MakeHandler(csrf, SessionCheck)
+    );
+
+    baseGrp.GET("/api/me", MakeHandler(userController, CurrentUser));
+    baseGrp.GET("/register", MakeHandler(userController, RegisterPage));
+    baseGrp.GET("/login", MakeHandler(userController, LoginPage));
+    baseGrp.GET("/welcome", MakeHandler(userController, WelcomePage));
+    baseGrp.GET(
         "/api/csrf",
-        MakeHandler(store, Sessions),
         MakeHandler(limiter, ByNewSessionIP),
         MakeHandler(csrf, SessionIssue)
     );
-    httpserver.GET(
-        "/api/me",
-        MakeHandler(store, Sessions),
-        MakeHandler(userController, CurrentUser)
-    );
-    httpserver.GET(
-        "/register",
-        MakeHandler(store, Sessions),
-        MakeHandler(userController, RegisterPage)
-    );
-    httpserver.POST(
+    postGrp.POST(
         "/register",
         MakeHandler(limiter, ByIP),
-        MakeHandler(store, Sessions),
-        MakeHandler(userController, RequireAnonymous),
         MakeHandler(limiter, BySession),
-        MakeHandler(csrf, SessionCheck),
+        MakeHandler(userController, RequireAnonymous),
         MakeHandler(userController, Register)
     );
-    httpserver.GET(
-        "/login",
-        MakeHandler(store, Sessions),
-        MakeHandler(userController, LoginPage)
-    );
-    httpserver.POST(
+    postGrp.POST(
         "/login",
         MakeHandler(limiter, ByIP),
-        MakeHandler(store, Sessions),
         MakeHandler(limiter, ByAccount),
-        MakeHandler(csrf, SessionCheck),
         MakeHandler(userController, Login)
     );
-    httpserver.POST(
+    postGrp.POST(
         "/logout",
         MakeHandler(limiter, ByIP),
-        MakeHandler(store, Sessions),
         MakeHandler(limiter, BySession),
-        MakeHandler(csrf, SessionCheck),
         MakeHandler(userController, Logout)
-    );
-    httpserver.GET(
-        "/welcome",
-        MakeHandler(store, Sessions),
-        MakeHandler(userController, WelcomePage)
     );
 
     // 9. 阻塞等待服务运行结束.
-    co_await httpserver.Run();
+    co_await svr.Run();
 }
 
 void ParseArgs(int argc, const char* argv[], bool& daemonize, std::string& config_path)
@@ -341,8 +338,7 @@ int main(int argc, const char *argv[])
     uco::OpenLog(module, level, mode, syslog);
 
     // 4. 进程初始化，并在创建任何线程前屏蔽服务信号；后续线程继承掩码.
-    const auto blocked_signals =
-        config.GetList<int>("process.blocked_signals");
+    const auto blocked_signals = config.GetList<int>("process.blocked_signals");
     uco::InitProcess(daemonize, module, blocked_signals);
 
     // 5. 启动服务, 异步任务需要值传递 config.

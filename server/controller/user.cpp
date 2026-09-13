@@ -19,8 +19,6 @@
 #include "core/ulog.h"
 
 #include <string>
-#include <unordered_map>
-#include <utility>
 
 namespace webserver
 {
@@ -153,8 +151,7 @@ uco::task<void> UserController::Register(HttpContext *ctx)
 {
     // 1. 表单绑定 (CSRF 已由链上 CsrfProtect 中间件校验; 失败由
     //    BindForm 内部 400 + Abort).
-    std::unordered_map<std::string, std::string> fields;
-    ctx->BindForm(fields);
+    const auto &fields = ctx->BindForm();
 
     auto it_user = fields.find("username");
     auto it_pass = fields.find("password");
@@ -270,8 +267,7 @@ uco::task<void> UserController::Login(HttpContext *ctx)
 {
     // 1. 表单绑定 (CSRF 已由链上 CsrfProtect 中间件校验; 失败由
     //    BindForm 内部 400 + Abort).
-    std::unordered_map<std::string, std::string> fields;
-    ctx->BindForm(fields);
+    const auto &fields = ctx->BindForm();
 
     auto it_user = fields.find("username");
     auto it_pass = fields.find("password");

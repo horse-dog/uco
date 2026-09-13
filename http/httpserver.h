@@ -11,6 +11,7 @@
 #include <functional>
 #include <map>
 #include <type_traits>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -43,6 +44,8 @@ class HttpServer
   public:
     /** @brief 路由处理函数，可为普通函数/lambda/成员函数绑定. */
     using HandleFunc = std::function<uco::task<void>(HttpContext *)>;
+
+    class RouteGroup;
     /**
      * @brief 构造并配置 HTTP 服务器。
      *
@@ -79,6 +82,14 @@ class HttpServer
 
     void Static(const std::string &path);
 
+    /**
+     * @brief 创建路由组；组中间件会按声明顺序置于每条路由 handler 之前。
+     * @note 返回的 RouteGroup 不拥有 HttpServer，必须在 server 生命周期内使用。
+     */
+    template <typename... Fn>
+        requires(std::convertible_to<Fn, HandleFunc> && ...)
+    RouteGroup Group(const std::string &prefix, Fn... middleware);
+
     template <typename... Fn>
         requires(std::convertible_to<Fn, HandleFunc> && ...)
     void GET(const std::string &path, Fn... handles)
@@ -107,6 +118,12 @@ class HttpServer
     friend class HttpContext;
     friend class HttpConnection;
     friend class HttpServerInstance;
+    friend class RouteGroup;
+
+    void AddRoute(HttpMethod method, const std::string &path,
+                  std::vector<HandleFunc> handles);
+    void AddStaticRoute(const std::string &path,
+                        std::vector<HandleFunc> middleware);
 
     struct TrieNode
     {
@@ -140,6 +157,15 @@ class HttpServer
         {
             auto node = __insert(path);
             (node->handles.push_back(handles), ...);
+        }
+
+        void insert(const std::string &path, std::vector<HandleFunc> handles)
+        {
+            auto node = __insert(path);
+            for (auto &handle : handles)
+            {
+                node->handles.push_back(std::move(handle));
+            }
         }
 
         // 返回是否匹配，并且提取参数（当有命名参数或通配符时）
@@ -225,6 +251,91 @@ class HttpServer
     std::unordered_map<HttpMethod, PrefixTree> m_trees;
     std::unordered_map<int, std::string> m_mapErrorPagePath;
 };
+
+/**
+ * @brief 一组共享路径前缀和中间件的路由注册器，语义与 Gin RouterGroup 类似。
+ *
+ * 子组会继承父组中间件；最终顺序为父组中间件、子组中间件、路由 handler。
+ */
+class HttpServer::RouteGroup
+{
+  public:
+    template <typename... Fn>
+        requires(std::convertible_to<Fn, HandleFunc> && ...)
+    RouteGroup Group(const std::string &prefix, Fn... middleware) const
+    {
+        std::vector<HandleFunc> handles = m_middleware;
+        (handles.emplace_back(std::move(middleware)), ...);
+        return RouteGroup(m_server, JoinPath(m_prefix, prefix),
+                          std::move(handles));
+    }
+
+    template <typename... Fn>
+        requires(std::convertible_to<Fn, HandleFunc> && ...)
+    void GET(const std::string &path, Fn... handles) const
+    {
+        Register(eGet, path, std::move(handles)...);
+    }
+
+    template <typename... Fn>
+        requires(std::convertible_to<Fn, HandleFunc> && ...)
+    void HEAD(const std::string &path, Fn... handles) const
+    {
+        Register(eHead, path, std::move(handles)...);
+    }
+
+    template <typename... Fn>
+        requires(std::convertible_to<Fn, HandleFunc> && ...)
+    void POST(const std::string &path, Fn... handles) const
+    {
+        Register(ePost, path, std::move(handles)...);
+    }
+
+    void Static(const std::string &path) const;
+
+  private:
+    friend class HttpServer;
+
+    RouteGroup(HttpServer *server, std::string prefix,
+               std::vector<HandleFunc> middleware)
+        : m_server(server), m_prefix(std::move(prefix)),
+          m_middleware(std::move(middleware))
+    {
+    }
+
+    template <typename... Fn>
+    void Register(HttpMethod method, const std::string &path,
+                  Fn... handles) const
+    {
+        std::vector<HandleFunc> chain = m_middleware;
+        (chain.emplace_back(std::move(handles)), ...);
+        m_server->AddRoute(method, JoinPath(m_prefix, path), std::move(chain));
+    }
+
+    static std::string JoinPath(const std::string &prefix,
+                                const std::string &path);
+
+    HttpServer *m_server;
+    std::string m_prefix;
+    std::vector<HandleFunc> m_middleware;
+};
+
+template <typename... Fn>
+    requires(std::convertible_to<Fn, HttpServer::HandleFunc> && ...)
+HttpServer::RouteGroup HttpServer::Group(const std::string &prefix,
+                                         Fn... middleware)
+{
+    std::vector<HandleFunc> handles;
+    handles.reserve(sizeof...(middleware));
+    (handles.emplace_back(std::move(middleware)), ...);
+    return RouteGroup(this, prefix, std::move(handles));
+}
+
+/**
+ * @brief 创建设置 Cache-Control 响应头的中间件。
+ * @param value Cache-Control 字段值，例如 "private, no-store"。
+ */
+HttpServer::HandleFunc CacheControl(std::string value);
 
 /**
  * @brief Abort() 抛出的控制流异常: 中止 handler 链, 由 HttpConnection::Process 捕获处理.
@@ -379,11 +490,25 @@ class HttpContext
 
     void BindJSON(google::protobuf::Message &message);
 
-    bool ShouldBindForm(std::unordered_map<std::string, std::string> &fields,
-                        size_t max_body_size = 1024);
+    using FormFields = std::unordered_map<std::string, std::string>;
 
-    void BindForm(std::unordered_map<std::string, std::string> &fields,
-                  size_t max_body_size = 1024);
+    /**
+     * @brief 惰性解析并缓存 urlencoded 表单；失败返回 nullptr。
+     * @note 首次调用执行解析，后续调用直接读取 HttpContext 中的缓存。
+     */
+    const FormFields *ShouldBindForm(size_t max_body_size = 1024);
+
+    /** @brief 兼容输出参数形式；成功时从缓存复制字段。 */
+    bool ShouldBindForm(FormFields &fields, size_t max_body_size = 1024);
+
+    /**
+     * @brief 返回请求级表单缓存；解析失败时设置 400 并中止 handler 链。
+     * @note 返回引用仅在当前 HttpContext 生命周期内有效。
+     */
+    const FormFields &BindForm(size_t max_body_size = 1024);
+
+    /** @brief 兼容输出参数形式；从请求级缓存复制字段。 */
+    void BindForm(FormFields &fields, size_t max_body_size = 1024);
 
     uco::task<void> Next();
 
@@ -478,6 +603,13 @@ class HttpContext
     }
 
   private:
+    enum class FormState
+    {
+        eUnparsed,
+        eValid,
+        eInvalid,
+    };
+
     class HttpRequest *m_ptrReq = 0;
     class HttpResponse *m_ptrRsp = 0;
     size_t m_iCurHandleIndex = -1;
@@ -486,6 +618,9 @@ class HttpContext
     std::vector<HttpServer::HandleFunc> m_handles;
     std::unordered_map<std::string, std::string> m_mapParams;
     std::unordered_map<std::string, std::string> m_mapQueryParams;
+    FormFields m_mapFormFields;
+    FormState m_eFormState = FormState::eUnparsed;
+    size_t m_iFormBodySize = 0;
     std::string m_sClientIP; ///< TCP peer IP (限流等中间件的 key).
     std::unordered_map<std::string, void *> m_mapUserData;
     std::unordered_map<std::string, std::any> m_mapAnyUserData;

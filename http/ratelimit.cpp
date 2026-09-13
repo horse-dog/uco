@@ -2,14 +2,12 @@
 
 #include "core/uconfig.h"
 #include "core/ulog.h"
-#include "core/ustring.h"
 #include "http/session.h"
 
 #include <chrono>
 #include <mutex>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -21,26 +19,6 @@ namespace
 /// 计数表条目数上限，超过则触发懒清理。
 constexpr size_t kMaxKeys = 65536;
 
-/// 从 urlencoded 表单体提取并解码字段值，不消费 body。
-std::string ExtractFormField(std::string_view body, std::string_view name)
-{
-    for (size_t pos = 0; pos < body.size();)
-    {
-        const size_t next = body.find('&', pos);
-        const size_t end =
-            next == std::string_view::npos ? body.size() : next;
-        const std::string_view item = body.substr(pos, end - pos);
-        const size_t equal = item.find('=');
-        if (equal != std::string_view::npos &&
-            uco::UrlDecode(std::string(item.substr(0, equal)), true) == name)
-        {
-            return uco::UrlDecode(std::string(item.substr(equal + 1)), true);
-        }
-        pos = end + 1;
-    }
-    return "";
-}
-
 struct FixedWindowDetail
 {
     enum class KeyBy
@@ -50,27 +28,6 @@ struct FixedWindowDetail
         Session,
         Account,
     };
-
-    static const char* KeyByToStr(KeyBy keyby)
-    {
-        switch (keyby) {
-        case KeyBy::IP:
-            return "ip";
-            break;
-        case KeyBy::NewSessionIP:
-            return "new session ip";
-            break;
-        case KeyBy::Session:
-            return "session";
-            break;
-        case KeyBy::Account:
-            return "account";
-            break;
-        default:
-            break;
-        }
-        return "";
-    }
 
     struct Entry
     {
@@ -152,7 +109,23 @@ struct FixedWindowDetail
         case KeyBy::Session:
             return Session::FromContext(ctx)->ID();
         case KeyBy::Account:
-            return ExtractFormField(ctx->PeekRawData(), "username");
+            {
+                auto&& form = ctx->BindForm();
+                auto it = form.find("username");
+                if (it == form.end())
+                {
+                    ctx->Status(400);
+                    ctx->Abort("username field not exist in form");
+                }
+                auto&& username = it->second;
+                if (username.empty())
+                {
+                    ctx->Status(400);
+                    ctx->Abort("empty username field in form");
+                }
+                LOGERR(NR(username));
+                return it->second;
+            }
         }
         return "";
     }
@@ -171,7 +144,7 @@ struct FixedWindowDetail
                 ctx->SetHeader("Retry-After", std::to_string(retry_sec));
                 ctx->Data(429, "application/json",
                           "{\"code\":429,\"msg\":\"too many requests\"}");
-                ctx->Abort(std::string("too many requests: ") + KeyByToStr(key_by));
+                ctx->Abort();
             }
         }
         co_await ctx->Next();

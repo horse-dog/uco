@@ -3,6 +3,7 @@
 #include "core/ubuffer.h"
 #include "core/uio.h"
 #include "core/ulog.h"
+#include "core/ustring.h"
 #include "core/usync.h"
 #include <google/protobuf/message.h>
 #include <memory>
@@ -205,6 +206,22 @@ std::string HttpResponse::GetFileTypeByPath(const std::string &path)
 
 void HttpResponse::GenHttpHeader()
 {
+    // 路由未声明缓存策略时采用安全默认值，同时覆盖 404/500 等无路由响应。
+    bool has_cache_control = false;
+    for (const auto &[key, value] : m_vecMoreHeader)
+    {
+        (void)value;
+        if (uco::EqualsIgnoreCase(key, "Cache-Control"))
+        {
+            has_cache_control = true;
+            break;
+        }
+    }
+    if (!has_cache_control)
+    {
+        SetHeader("Cache-Control", "no-cache");
+    }
+
     std::string status = httpRetCode2StatusString[m_iHttpRetCode];
     m_httpRspHeaderBuffer.Append("HTTP/1.1 ");
     m_httpRspHeaderBuffer.Append(std::to_string(m_iHttpRetCode));
@@ -435,8 +452,21 @@ std::string HttpResponse::PathSuffix2FileType(const std::string &suffix)
     return pathSuffix2FileType[".txt"];
 }
 
-void HttpResponse::AddHeader(const std::string &key, const std::string &value)
+void HttpResponse::SetHeader(const std::string &key, const std::string &value)
 {
+    // Set-Cookie 按 HTTP 语义允许重复；其他字段采用覆盖写。
+    if (!uco::EqualsIgnoreCase(key, "Set-Cookie"))
+    {
+        for (auto &[current_key, current_value] : m_vecMoreHeader)
+        {
+            if (uco::EqualsIgnoreCase(current_key, key))
+            {
+                current_key = key;
+                current_value = value;
+                return;
+            }
+        }
+    }
     m_vecMoreHeader.emplace_back(key, value);
 }
 

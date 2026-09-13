@@ -26,7 +26,7 @@ class YamlConfig
      * @brief 从 YAML 文件加载配置。
      * @param path 配置文件路径。
      * @return 文件读取和 YAML 解析均成功时返回 true，否则清空当前配置并返回
-     *         false。
+     *         false；文件打开或读取失败时同时记录 SYSERR。
      */
     bool Load(const std::string &path) noexcept;
 
@@ -34,7 +34,7 @@ class YamlConfig
     bool Contains(const std::string &key) const noexcept;
 
     /**
-     * @brief 按类型读取标量，失败时返回 default_value。
+     * @brief 按类型读取标量，失败时返回 default_value 并记录 SYSERR。
      * @tparam T 支持 std::string、bool、整数和枚举类型。
      */
     template <class T>
@@ -57,16 +57,30 @@ class YamlConfig
             else if constexpr (std::signed_integral<Value>)
             {
                 std::int64_t result{};
-                return TryGetInt(key, result) && std::in_range<Value>(result)
-                           ? static_cast<Value>(result)
-                           : default_value;
+                if (!TryGetInt(key, result))
+                {
+                    return default_value;
+                }
+                if (!std::in_range<Value>(result))
+                {
+                    LogReadError(key, "signed integer out of range");
+                    return default_value;
+                }
+                return static_cast<Value>(result);
             }
             else if constexpr (std::unsigned_integral<Value>)
             {
                 std::uint64_t result{};
-                return TryGetUInt(key, result) && std::in_range<Value>(result)
-                           ? static_cast<Value>(result)
-                           : default_value;
+                if (!TryGetUInt(key, result))
+                {
+                    return default_value;
+                }
+                if (!std::in_range<Value>(result))
+                {
+                    LogReadError(key, "unsigned integer out of range");
+                    return default_value;
+                }
+                return static_cast<Value>(result);
             }
             else if constexpr (std::is_enum_v<Value>)
             {
@@ -82,12 +96,13 @@ class YamlConfig
         }
         catch (...)
         {
+            LogReadError(key, "exception while reading scalar");
             return default_value;
         }
     }
 
     /**
-     * @brief 读取 YAML 行内列表，任意失败均返回空 vector。
+     * @brief 读取 YAML 行内列表，任意失败均记录 SYSERR 并返回空 vector。
      * @tparam T 支持 std::string、bool、整数和枚举类型。
      */
     template <class T>
@@ -108,6 +123,7 @@ class YamlConfig
                 T item{};
                 if (!TryConvertListValue(value, item))
                 {
+                    LogReadError(key, "list element type mismatch");
                     return {};
                 }
                 result.push_back(std::move(item));
@@ -116,6 +132,7 @@ class YamlConfig
         }
         catch (...)
         {
+            LogReadError(key, "exception while reading list");
             return {};
         }
     }
@@ -182,6 +199,8 @@ class YamlConfig
         }
     }
 
+    static void LogReadError(const std::string &key,
+                             const char *reason) noexcept;
     bool TryGetString(const std::string &key, std::string &value) const noexcept;
     bool TryGetInt(const std::string &key, std::int64_t &value) const noexcept;
     bool TryGetUInt(const std::string &key, std::uint64_t &value) const noexcept;
