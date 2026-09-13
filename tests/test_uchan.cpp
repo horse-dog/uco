@@ -2,13 +2,10 @@
 
 using namespace uco;
 
-// 本文件的局部 sema/psema/csema 只用于同一调度线程内的完成计数：所有
-// producer/consumer 均由当前线程的 go 启动，signal() 完整返回后，调度器
-// 才可能恢复父协程，因此父协程退出并析构信号量和 channel 时没有并行调用。
-// 若将 producer/consumer 移到其他 OS 线程，这种写法可能产生 UB：wait()
-// 消费许可后父协程可能立即析构 sema，而另一线程的 signal() 尚未返回、
-// 仍可能访问 sema；channel 也必须存活到所有收发操作结束。跨线程时必须
-// 使用共享所有权，或先 join 所有生产者和消费者线程。
+// 本文件的局部 sema/psema/csema 只用于同一调度线程内的完成计数。usema
+// 的共享内部状态允许外层对象析构时，已进入的 signal() 安全返回；但不允许
+// 其他线程在 usema 已析构后才开始调用成员函数。uchan 本身也必须存活到
+// 所有收发操作结束；跨线程时仍须用 join 或共享所有权保证这些外层对象。
 // Test 1: Buffered channel (capacity=3)
 task<void> producer(uchan<int, 3> &ch, usema &sema)
 {

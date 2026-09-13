@@ -5,12 +5,10 @@
 
 using namespace uco;
 
-// 本文件的局部 sema 只用于同一调度线程内的完成计数：所有子协程均由
-// 当前线程的 go 启动，signal() 完整返回后，调度器才可能恢复父协程，
-// 因此父协程退出并析构 sema 时，不会有并行执行中的 signal()。
-// 若将 worker/waiter 移到其他 OS 线程，这种写法可能产生 UB：wait()
-// 消费许可后父协程可能立即析构 sema，而另一线程的 signal() 尚未返回、
-// 仍可能访问 sema。跨线程时必须用共享所有权，或先 join 生产者线程。
+// 本文件的局部 sema 只用于同一调度线程内的完成计数。usema 的共享内部
+// 状态也允许 wait() 消费许可并析构外层 usema 时，已进入的 signal() 安全
+// 返回。它不允许另一线程在 usema 已析构后才开始调用 signal()；跨线程时
+// 仍须通过 join 或其他协议保证所有成员函数都在对象生命周期内开始调用。
 task<void> worker(bool sleep, umutex& mtx, ucond& cv, usema& sema, bool& is_ready, bool notify_all=false)
 {
     LOGMSG("worker coroutine start.");

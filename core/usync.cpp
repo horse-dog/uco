@@ -1,4 +1,5 @@
 #define _UCO_THREAD_ENV_IMPL
+#define _UCO_SEMAPHORE_IMPL
 #include <thread>
 #include <atomic>
 #include <cassert>
@@ -609,25 +610,31 @@ void ucond::notify_all()
     }
 }
 
-usema::usema(size_t cnt) : count(cnt)
+struct usema_impl
 {
-    pLock = new spin_lock();
-    pWaiter = new __inner__::uco_linked_list();
-}
+    explicit usema_impl(size_t cnt) : count(cnt) {}
 
-usema::~usema()
-{
-    if (pLock)
-        delete LOCK;
-    pLock = nullptr;
-    if (pWaiter)
-        delete WQ;
-    pWaiter = nullptr;
-    nwait.store(0);
-    count.store(0);
-}
+    __inner__::uco_linked_list waiter_list;
+    spin_lock lock;
+    std::atomic<size_t> nwait{0};
+    std::atomic<size_t> count;
+    bool killed = false; // 仅在 lock 保护下访问.
+
+    static task<void> wait(std::shared_ptr<usema_impl> state, bool lifo);
+    bool try_wait();
+};
+
+usema::usema(size_t cnt) : m_impl(std::make_shared<usema_impl>(cnt)) {}
+
+usema::~usema() = default;
 
 task<void> usema::wait(bool lifo)
+{
+    // impl::wait 的参数在协程创建时进入协程帧，不必等首次 resume 才持有状态.
+    return usema_impl::wait(m_impl, lifo);
+}
+
+task<void> usema_impl::wait(std::shared_ptr<usema_impl> state, bool lifo)
 {
     auto pPromise = co_await get_promise_addr_t();
     pPromise->tid = UCOENV.thread_id;
@@ -636,7 +643,7 @@ task<void> usema::wait(bool lifo)
 retry:
     for (int i = 0; i < MAX_SPIN; i++)
     {
-        if (try_wait())
+        if (state->try_wait())
         {
             co_return;
         }
@@ -647,28 +654,28 @@ retry:
         }
     }
 
-    LOCK->lock();
-    if (pWaiter == nullptr) [[unlikely]]
+    state->lock.lock();
+    if (state->killed) [[unlikely]]
     {
-        LOCK->unlock();
+        state->lock.unlock();
         co_return;
     }
-    ++nwait;
-    if (try_wait())
+    ++state->nwait;
+    if (state->try_wait())
     {
-        --nwait;
-        LOCK->unlock();
+        --state->nwait;
+        state->lock.unlock();
         co_return;
     }
-    WQ->push(pPromise, lifo);
-    LOCK->unlock();
+    state->waiter_list.push(pPromise, lifo);
+    state->lock.unlock();
     ++UCOENV.sync_event_count;
     co_await sync_awaitable();
     --UCOENV.sync_event_count;
     goto retry;
 }
 
-bool usema::try_wait()
+bool usema_impl::try_wait()
 {
     while (true)
     {
@@ -684,31 +691,40 @@ bool usema::try_wait()
     }
 }
 
+bool usema::try_wait()
+{
+    auto state = m_impl;
+    return state->try_wait();
+}
+
 void usema::signal()
 {
-    ++count;
-    if (nwait.load() == 0)
+    // 必须在发布许可前取得所有权；许可一旦可见，wait() 可能立即返回并
+    // 析构外层 usema，但本次 signal() 仍可通过 state 安全完成。
+    auto state = m_impl;
+    ++state->count;
+    if (state->nwait.load() == 0)
     {
         return;
     }
 
-    LOCK->lock();
-    if (nwait.load() == 0)
+    state->lock.lock();
+    if (state->nwait.load() == 0)
     {
-        LOCK->unlock();
+        state->lock.unlock();
         return;
     }
-    if (WQ->empty())
+    if (state->waiter_list.empty())
     {
-        LOCK->unlock();
+        state->lock.unlock();
         return;
     }
-    auto co = WQ->pop();
+    auto co = state->waiter_list.pop();
     if (co != nullptr)
     {
-        --nwait;
+        --state->nwait;
     }
-    LOCK->unlock();
+    state->lock.unlock();
     if (co == nullptr)
     {
         SYSERR("should not be nullptr");
@@ -726,20 +742,22 @@ void usema::signal()
     }
 }
 
-void usema::__kill_broadcast()
+namespace __inner__
 {
-    LOCK->lock();
-    auto wq = WQ;
-    if (wq == nullptr)
+void kill_broadcast(usema& sema)
+{
+    auto state = sema.m_impl;
+    state->lock.lock();
+    if (state->killed)
     {
+        state->lock.unlock();
         SYSERR("double usema kill.");
         std::__terminate();
     }
-    pWaiter = nullptr;
-    nwait.store(0);
-    auto waiters = wq->take_all();
-    LOCK->unlock();
-    delete wq;
+    state->killed = true;
+    state->nwait.store(0);
+    auto waiters = state->waiter_list.take_all();
+    state->lock.unlock();
 
     eventfd_t writemsg = 1;
     std::unordered_set<int> fds;
@@ -758,6 +776,7 @@ void usema::__kill_broadcast()
             SYSERR("eventfd %d full", fd);
         }
     }
+}
 }
 
 thread_local bool is_do_batching = false;

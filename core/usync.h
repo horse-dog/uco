@@ -358,19 +358,17 @@ class usema
 
     usema &operator=(usema &&) = delete;
 
-    task<void> wait(bool lifo=false);
-    
+    task<void> wait(bool lifo = false);
+
     bool try_wait();
 
     void signal();
-
+#ifndef _UCO_SEMAPHORE_IMPL
   private:
-    template <typename _Tp, int Size> friend class uchan;
-    void __kill_broadcast();
-    void *pWaiter;
-    void *pLock;
-    std::atomic<size_t> nwait;
-    std::atomic<size_t> count;
+#endif
+    // 每次操作先持有内部状态，使 wait() 返回并析构 usema 后，已进入的
+    // signal() 仍可安全完成。usema 对象本身仍不得与成员函数入口并发析构。
+    std::shared_ptr<struct usema_impl> m_impl;
 };
 
 /**
@@ -464,6 +462,11 @@ class usleeper
     std::atomic<uint64_t> pending_wakes_ = 0; ///< 醒着时的唤醒计数.
 };
 
+namespace __inner__
+{
+    void kill_broadcast(usema& sema);
+}
+
 template <typename _Tp, int Size=0> class uchan
 {
   public:
@@ -522,9 +525,10 @@ template <typename _Tp, int Size=0> class uchan
 
     void close()
     {
+        using namespace __inner__;
         _M_closed.store(true);
-        _M_full.__kill_broadcast();
-        _M_space.__kill_broadcast();
+        kill_broadcast(_M_full);
+        kill_broadcast(_M_space);
     }
 
   private:
@@ -606,10 +610,11 @@ template <typename _Tp> class uchan<_Tp, 0>
 
     void close()
     {
+        using namespace __inner__;
         _M_closed.store(true);
-        _M_can_write.__kill_broadcast();
-        _M_can_read.__kill_broadcast();
-        _M_read_done.__kill_broadcast();
+        kill_broadcast(_M_can_write);
+        kill_broadcast(_M_can_read);
+        kill_broadcast(_M_read_done);
     }
 
   private:

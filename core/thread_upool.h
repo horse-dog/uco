@@ -126,16 +126,12 @@ class thread_upool
     }
 
   private:
-    struct Completion
-    {
-        int ret_code = RetCode::kOk;
-        uco::usema notify_sema;
-    };
-
     // 任务
     struct Task
     {
-        std::shared_ptr<Completion> completion;
+        int *ret_code =
+            0; // 0: ok, 1: 线程池已退出, 2: 执行异常, 3: 负载过高拒绝.
+        uco::usema *notify_sema = 0;
         std::function<void()> job;
     };
 
@@ -155,17 +151,15 @@ class thread_upool
   private:
     template <class F> uco::task<int> executeTask(F task)
     {
-        // wait() 成功仅表示 signal() 发布的许可已被消费，不保证工作协程的
-        // signal() 已返回。executeTask 与 Task 共同持有完成状态，确保
-        // Completion 至少存活到通知调用完整返回。
-        auto completion = std::make_shared<Completion>();
-        int add_ret = co_await addTask(std::move(task), completion);
+        uco::usema sem;
+        int ret_code = RetCode::kOk;
+        int add_ret = co_await addTask(std::move(task), &ret_code, &sem);
         if (add_ret != RetCode::kOk)
         {
             co_return add_ret;
         }
-        co_await completion->notify_sema.wait();
-        co_return completion->ret_code;
+        co_await sem.wait();
+        co_return ret_code;
     }
 
     /**
@@ -175,8 +169,7 @@ class thread_upool
      *         kBusy: 无工作线程或等待队列已满.
      */
     template <class F>
-    uco::task<int> addTask(F &&task,
-                           std::shared_ptr<Completion> completion)
+    uco::task<int> addTask(F &&task, int *ret_code, uco::usema *sem)
     {
         if (m_num_workers.load() == 0)
         {
@@ -200,7 +193,7 @@ class thread_upool
                 SYSERR("Pool overloaded, reject");
                 co_return RetCode::kBusy;
             }
-            m_pool->tasks.emplace(std::move(completion), std::forward<F>(task));
+            m_pool->tasks.emplace(ret_code, sem, std::forward<F>(task));
         }
         m_pool->cond.notify_one();
         co_return RetCode::kOk;
@@ -222,8 +215,16 @@ class thread_upool
                 {
                     auto task = std::move(tasks.front());
                     tasks.pop();
-                    task.completion->ret_code = RetCode::kExit;
-                    task.completion->notify_sema.signal();
+                    if (task.ret_code)
+                        *task.ret_code = RetCode::kExit;
+                    if (task.notify_sema)
+                    {
+                        task.notify_sema->signal();
+                    }
+                    else
+                    {
+                        SYSERR("Error: no notify sema");
+                    }
                 }
 
                 break;
@@ -236,19 +237,29 @@ class thread_upool
                 try
                 {
                     task.job();
-                    task.completion->ret_code = RetCode::kOk;
+                    if (task.ret_code)
+                        *task.ret_code = RetCode::kOk;
                 }
                 catch (const std::exception &e)
                 {
                     SYSERR("thread pool task exception:", e.what());
-                    task.completion->ret_code = RetCode::kException;
+                    if (task.ret_code)
+                        *task.ret_code = RetCode::kException;
                 }
                 catch (...)
                 {
                     SYSERR("thread pool task exception: unknown");
-                    task.completion->ret_code = RetCode::kException;
+                    if (task.ret_code)
+                        *task.ret_code = RetCode::kException;
                 }
-                task.completion->notify_sema.signal();
+                if (task.notify_sema) [[likely]]
+                {
+                    task.notify_sema->signal();
+                }
+                else
+                {
+                    SYSERR("Error: no notify sema");
+                }
                 co_await locker.lock();
             }
             else
