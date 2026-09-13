@@ -14,6 +14,7 @@
 #include <string>
 #include <sys/types.h>
 #include <unordered_map>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -490,13 +491,14 @@ uco::task<void> HttpConnection::HandleRequest(std::string &sErrMsg, bool& bLog)
         m_httpRequest.m_sPath = sDecodePath;
     }
 
-    auto [handles, params] =
+    auto [handles, params, routePattern] =
         m_pHttpServer->GetHandles(method, m_httpRequest.m_sPath);
 
     if (!handles.empty())
     {
         HttpContext ctx(&m_httpRequest, &m_httpResponse, handles, params,
-                        mapQueryParams, peer_to_ip(m_sockAddr));
+                        mapQueryParams, peer_to_ip(m_sockAddr),
+                        std::move(routePattern));
         try
         {
             co_await ctx.Next();

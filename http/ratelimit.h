@@ -5,6 +5,7 @@
  * @brief HTTP 限流中间件接口及固定窗口实现。
  *
  * 限流方法只描述计数维度，不感知注册、登录、登出等业务路由：
+ *   - ByKey：由用户注入 KeyGetter；
  *   - ByIP：按客户端 IP；
  *   - ByNewSessionIP：仅新建匿名会话时按客户端 IP；
  *   - BySession：按 Session ID；
@@ -16,25 +17,100 @@
  * @code
  *   ratelimit::FixedWindow limiter(config);
  *   httpserver.POST("/login",
- *       MakeHandler(limiter, ByIP),
- *       MakeHandler(store, Sessions),
- *       MakeHandler(csrf, SessionCheck),
- *       MakeHandler(limiter, ByAccount),
- *       MakeHandler(controller, Login));
+ *       MakeRejectHandler(limiter, ByIP),
+ *       MakeRejectHandler(store, Sessions),
+ *       MakeRejectHandler(csrf, SessionCheck),
+ *       MakeRejectHandler(limiter, ByAccount),
+ *       MakeRejectHandler(controller, Login));
  * @endcode
  */
 
 #include "core/uconfig.h"
 #include "http/httpserver.h"
 
+#include <cstdint>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <utility>
+
 namespace ratelimit
 {
+
+/**
+ * @brief 从当前请求提取限流键；结果原样传给 RejectHandler。
+ * @note 默认 RejectHandler 会跳过空键；自定义 RejectHandler 可自行定义空键语义。
+ *       回调会被复制到中间件中，其捕获对象须满足正常的值语义。
+ */
+using KeyGetter = std::function<std::string(HttpContext *)>;
+
+/** @brief 单个固定窗口限流中间件的并发安全计数器。 */
+class Counter
+{
+  public:
+    Counter(int limit, int window_sec);
+
+    Counter(const Counter &) = delete;
+    Counter &operator=(const Counter &) = delete;
+    Counter(Counter &&) = delete;
+    Counter &operator=(Counter &&) = delete;
+
+    /**
+     * @brief 记录 key 的本次请求并判断是否允许。
+     * @return {是否允许, 建议重试秒数}；允许时重试秒数为 0。
+     */
+    std::pair<bool, int> Allow(const std::string &key);
+
+    /**
+     * @brief 无副作用地计算当前固定窗口的剩余秒数。
+     * @return 向上取整后的剩余秒数，最小为 1。
+     */
+    int RetryAfter() const;
+
+  private:
+    struct Entry
+    {
+        uint64_t window = 0;
+        uint64_t count = 0;
+    };
+
+    int m_limit;
+    uint64_t m_windowMs;
+    std::mutex m_mutex;
+    std::unordered_map<std::string, Entry> m_entries;
+};
+
+/**
+ * @brief 单个限流中间件的自定义处理器。
+ * @param ctx 当前请求上下文。
+ * @param counter 当前中间件独占的计数器。
+ * @param key 本次请求的限流键，KeyGetter 返回空串时这里也为空。
+ * @return true 表示拒绝请求，false 表示继续请求链。
+ * @note 处理器负责调用 Counter::Allow 并按需生成响应，且不得调用 Next()。
+ *       可以返回 true，也可以调用 Abort() 拒绝请求；限流器都会重新获取最新
+ *       重试时间、覆盖 Retry-After 并确保请求链中止。
+ */
+using RejectHandler = std::function<
+    uco::task<bool>(HttpContext *, Counter &, const std::string &)>;
 
 /** @brief 按计数维度创建限流中间件的接口。 */
 class Limiter
 {
   public:
     virtual ~Limiter() = default;
+
+    /**
+     * @brief 使用自定义键提取器创建限流处理函数。
+     * @param key_getter 每个请求调用一次，返回值原样传给 reject_handler。
+     * @param limit 窗口内允许的最大请求数，必须大于 0。
+     * @param window_sec 固定窗口秒数，必须大于 0。
+     * @param reject_handler 当前中间件的拒绝处理器；为空时使用默认逻辑。
+     * @return 独占当前路由挂载点计数器的处理函数。
+     */
+    virtual HttpServer::HandleFunc
+    ByKey(KeyGetter key_getter, int limit, int window_sec,
+          RejectHandler reject_handler = {}) = 0;
 
     /**
      * @brief 创建按客户端 IP 计数的限流处理函数。
@@ -78,16 +154,41 @@ class FixedWindow final : public Limiter
     FixedWindow(FixedWindow &&) = delete;
     FixedWindow &operator=(FixedWindow &&) = delete;
 
-    /** @copydoc Limiter::ByIP */
+    /**
+     * @brief 使用自定义键提取器创建固定窗口限流处理函数。
+     * @param key_getter 每个请求调用一次，返回值原样传给 reject_handler。
+     * @param limit 窗口内允许的最大请求数，必须大于 0。
+     * @param window_sec 固定窗口秒数，必须大于 0。
+     * @param reject_handler 当前中间件的拒绝处理器；为空时使用默认逻辑。
+     * @return 独占当前路由挂载点计数器的处理函数。
+     */
+    HttpServer::HandleFunc
+    ByKey(KeyGetter key_getter, int limit, int window_sec,
+          RejectHandler reject_handler = {}) override;
+
+    /**
+     * @brief 使用 rate_limit.ip 配置创建按客户端 IP 计数的处理函数。
+     * @return 独占当前路由挂载点计数器的处理函数。
+     */
     HttpServer::HandleFunc ByIP() override;
 
-    /** @copydoc Limiter::ByNewSessionIP */
+    /**
+     * @brief 使用 rate_limit.new_session_ip 配置创建仅针对新匿名会话、
+     *        按客户端 IP 计数的处理函数。
+     * @return 独占当前路由挂载点计数器的处理函数。
+     */
     HttpServer::HandleFunc ByNewSessionIP() override;
 
-    /** @copydoc Limiter::BySession */
+    /**
+     * @brief 使用 rate_limit.session 配置创建按 Session ID 计数的处理函数。
+     * @return 独占当前路由挂载点计数器的处理函数。
+     */
     HttpServer::HandleFunc BySession() override;
 
-    /** @copydoc Limiter::ByAccount */
+    /**
+     * @brief 使用 rate_limit.account 配置创建按登录表单账号计数的处理函数。
+     * @return 独占当前路由挂载点计数器的处理函数。
+     */
     HttpServer::HandleFunc ByAccount() override;
 
   private:

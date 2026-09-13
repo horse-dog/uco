@@ -28,14 +28,19 @@ HttpContext::HttpContext(
     std::vector<HttpServer::HandleFunc> &handles,
     std::unordered_map<std::string, std::string> &params,
     std::unordered_map<std::string, std::string> &queryParams,
-    const std::string &clientIP)
+    const std::string &clientIP, std::string routePattern)
     : m_ptrReq(ptrReq), m_ptrRsp(ptrRsp), m_handles(std::move(handles)),
-      m_mapParams(std::move(params)), m_mapQueryParams(std::move(queryParams)),
-      m_sClientIP(clientIP)
+      m_sRoutePattern(std::move(routePattern)), m_mapParams(std::move(params)),
+      m_mapQueryParams(std::move(queryParams)), m_sClientIP(clientIP)
 {
 }
 
 std::string HttpContext::GetRequestUrl() const { return m_ptrReq->m_sPath; }
+
+const std::string &HttpContext::GetRoutePattern() const noexcept
+{
+    return m_sRoutePattern;
+}
 
 const std::string &HttpContext::ClientIP() const { return m_sClientIP; }
 
@@ -704,8 +709,7 @@ HttpServer::HttpServerInstance::GetForward(HttpMethod method,
     return "";
 }
 
-std::pair<std::vector<HttpServer::HandleFunc>,
-          std::unordered_map<std::string, std::string>>
+HttpServer::RouteMatch
 HttpServer::HttpServerInstance::GetHandles(HttpMethod method,
                                            const std::string &path) const
 {
@@ -966,9 +970,23 @@ void HttpServer::Static(const std::string &path)
     AddStaticRoute(path, {});
 }
 
+std::vector<HttpServer::HandleFunc>
+HttpServer::RouteGroup::InstantiateMiddleware(
+    std::string_view route_pattern) const
+{
+    std::vector<HandleFunc> handles;
+    handles.reserve(m_middleware.size());
+    for (const auto &middleware : m_middleware)
+    {
+        handles.emplace_back(middleware.Instantiate(route_pattern));
+    }
+    return handles;
+}
+
 void HttpServer::RouteGroup::Static(const std::string &path) const
 {
-    m_server->AddStaticRoute(JoinPath(m_prefix, path), m_middleware);
+    const std::string full_path = JoinPath(m_prefix, path);
+    m_server->AddStaticRoute(full_path, InstantiateMiddleware(full_path));
 }
 
 HttpServer::HandleFunc CacheControl(std::string value)
@@ -994,18 +1012,16 @@ void HttpServer::ErrorPage(int errHttpCode, const std::string &error_html_path)
     m_mapErrorPagePath.emplace(errHttpCode, error_html_path);
 }
 
-std::pair<std::vector<HttpServer::HandleFunc>,
-          std::unordered_map<std::string, std::string>>
+HttpServer::RouteMatch
 HttpServer::find_handles(HttpMethod method, const std::string &path)
 {
-    std::vector<HandleFunc> handles;
-    std::unordered_map<std::string, std::string> params;
+    RouteMatch result;
     auto it = m_trees.find(method);
     if (it != m_trees.end())
     {
-        it->second.match(path, handles, params);
+        it->second.match(path, result);
     }
-    return {handles, params};
+    return result;
 }
 
 void HttpServer::setup_signalfd()
@@ -1114,6 +1130,7 @@ HttpServer::TrieNode *HttpServer::PrefixTree::__insert(const std::string &path)
 {
     vector<string> parts = splitPath(path);
     TrieNode *cur = root;
+    string pattern;
     for (size_t i = 0; i < parts.size(); i++)
     {
         string &segment = parts[i];
@@ -1125,6 +1142,7 @@ HttpServer::TrieNode *HttpServer::PrefixTree::__insert(const std::string &path)
                 cur->paramChild->paramName = segment.substr(1);
             }
             cur = cur->paramChild;
+            pattern += "/:" + cur->paramName;
         }
         else if (!segment.empty() && segment[0] == '*')
         {
@@ -1134,6 +1152,7 @@ HttpServer::TrieNode *HttpServer::PrefixTree::__insert(const std::string &path)
                 cur->wildcardChild->wildcardName = segment.substr(1);
             }
             cur = cur->wildcardChild;
+            pattern += "/*" + cur->wildcardName;
             break;
         }
         else
@@ -1143,25 +1162,25 @@ HttpServer::TrieNode *HttpServer::PrefixTree::__insert(const std::string &path)
                 cur->children[segment] = new TrieNode();
             }
             cur = cur->children[segment];
+            pattern += "/" + segment;
         }
     }
     cur->isEnd = true;
+    cur->routePattern = pattern.empty() ? "/" : std::move(pattern);
     return cur;
 }
 
 bool HttpServer::PrefixTree::match(const string &path,
-                                   std::vector<HandleFunc> &handles,
-                                   unordered_map<string, string> &params) const
+                                   RouteMatch &result) const
 {
-    handles.clear();
+    result = {};
     vector<string> parts = splitPath(path);
-    return dfsMatch(root, parts, 0, handles, params);
+    return dfsMatch(root, parts, 0, result);
 }
 
-bool HttpServer::PrefixTree::dfsMatch(
-    TrieNode *node, const vector<string> &parts, size_t idx,
-    std::vector<HandleFunc> &handles,
-    unordered_map<string, string> &params) const
+bool HttpServer::PrefixTree::dfsMatch(TrieNode *node,
+                                      const vector<string> &parts,
+                                      size_t idx, RouteMatch &result) const
 {
     if (!node)
         return false;
@@ -1170,14 +1189,16 @@ bool HttpServer::PrefixTree::dfsMatch(
     {
         if (node->isEnd)
         {
-            handles = node->handles;
+            result.handles = node->handles;
+            result.pattern = node->routePattern;
             return true;
         }
         // 通配符节点匹配空路径
         if (node->wildcardChild && node->wildcardChild->isEnd)
         {
-            params[node->wildcardChild->wildcardName] = "";
-            handles = node->wildcardChild->handles;
+            result.params[node->wildcardChild->wildcardName] = "";
+            result.handles = node->wildcardChild->handles;
+            result.pattern = node->wildcardChild->routePattern;
             return true;
         }
         return false;
@@ -1187,7 +1208,7 @@ bool HttpServer::PrefixTree::dfsMatch(
 
     if (node->children.count(segment))
     {
-        if (dfsMatch(node->children[segment], parts, idx + 1, handles, params))
+        if (dfsMatch(node->children[segment], parts, idx + 1, result))
         {
             return true;
         }
@@ -1195,12 +1216,12 @@ bool HttpServer::PrefixTree::dfsMatch(
 
     if (node->paramChild)
     {
-        params[node->paramChild->paramName] = segment;
-        if (dfsMatch(node->paramChild, parts, idx + 1, handles, params))
+        result.params[node->paramChild->paramName] = segment;
+        if (dfsMatch(node->paramChild, parts, idx + 1, result))
         {
             return true;
         }
-        params.erase(node->paramChild->paramName); // 回溯
+        result.params.erase(node->paramChild->paramName); // 回溯
     }
 
     if (node->wildcardChild && node->wildcardChild->isEnd)
@@ -1212,8 +1233,9 @@ bool HttpServer::PrefixTree::dfsMatch(
                 rest += "/";
             rest += parts[i];
         }
-        params[node->wildcardChild->wildcardName] = rest;
-        handles = node->wildcardChild->handles;
+        result.params[node->wildcardChild->wildcardName] = rest;
+        result.handles = node->wildcardChild->handles;
+        result.pattern = node->wildcardChild->routePattern;
         return true;
     }
 

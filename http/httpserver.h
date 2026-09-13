@@ -10,6 +10,7 @@
 #include <concepts>
 #include <functional>
 #include <map>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <unordered_map>
@@ -44,6 +45,56 @@ class HttpServer
   public:
     /** @brief 路由处理函数，可为普通函数/lambda/成员函数绑定. */
     using HandleFunc = std::function<uco::task<void>(HttpContext *)>;
+
+    /** @brief 按规范路由模板创建独立处理函数的工厂。 */
+    using HandleFactory = std::function<HandleFunc(std::string_view)>;
+
+    /**
+     * @brief 路由组中间件；普通 handler 保持共享，PerRoute 工厂按路由实例化。
+     */
+    class Middleware
+    {
+      public:
+        Middleware(HandleFunc handle)
+            : m_factory([handle = std::move(handle)](std::string_view) {
+                  return handle;
+              })
+        {
+        }
+
+        template <class Fn>
+            requires(!std::same_as<std::remove_cvref_t<Fn>, Middleware> &&
+                     !std::same_as<std::remove_cvref_t<Fn>, HandleFunc> &&
+                     std::convertible_to<Fn, HandleFunc>)
+        Middleware(Fn &&handle)
+            : Middleware(HandleFunc(std::forward<Fn>(handle)))
+        {
+        }
+
+        static Middleware PerRoute(HandleFactory factory)
+        {
+            return Middleware(std::move(factory));
+        }
+
+        HandleFunc Instantiate(std::string_view route_pattern) const
+        {
+            return m_factory(route_pattern);
+        }
+
+        /** @brief 直接注册到具体路由时立即实例化一次。 */
+        operator HandleFunc() const
+        {
+            return Instantiate({});
+        }
+
+      private:
+        explicit Middleware(HandleFactory factory)
+            : m_factory(std::move(factory))
+        {
+        }
+
+        HandleFactory m_factory;
+    };
 
     class RouteGroup;
     /**
@@ -87,7 +138,7 @@ class HttpServer
      * @note 返回的 RouteGroup 不拥有 HttpServer，必须在 server 生命周期内使用。
      */
     template <typename... Fn>
-        requires(std::convertible_to<Fn, HandleFunc> && ...)
+        requires(std::constructible_from<Middleware, Fn> && ...)
     RouteGroup Group(const std::string &prefix, Fn... middleware);
 
     template <typename... Fn>
@@ -125,6 +176,13 @@ class HttpServer
     void AddStaticRoute(const std::string &path,
                         std::vector<HandleFunc> middleware);
 
+    struct RouteMatch
+    {
+        std::vector<HandleFunc> handles;
+        std::unordered_map<std::string, std::string> params;
+        std::string pattern;
+    };
+
     struct TrieNode
     {
         std::unordered_map<std::string, TrieNode *> children;
@@ -136,6 +194,7 @@ class HttpServer
         TrieNode *wildcardChild = nullptr;
         std::string wildcardName;
         std::vector<HandleFunc> handles;
+        std::string routePattern;
 
         bool isEnd = false;
 
@@ -168,17 +227,14 @@ class HttpServer
             }
         }
 
-        // 返回是否匹配，并且提取参数（当有命名参数或通配符时）
-        bool match(const std::string &path, std::vector<HandleFunc> &handles,
-                   std::unordered_map<std::string, std::string> &params) const;
+        // 返回是否匹配，并提取处理链、参数及规范路由模板。
+        bool match(const std::string &path, RouteMatch &result) const;
 
       private:
         TrieNode *__insert(const std::string &path);
 
-        bool
-        dfsMatch(TrieNode *node, const std::vector<std::string> &parts,
-                 size_t idx, std::vector<HandleFunc> &handles,
-                 std::unordered_map<std::string, std::string> &params) const;
+        bool dfsMatch(TrieNode *node, const std::vector<std::string> &parts,
+                      size_t idx, RouteMatch &result) const;
     };
 
     class HttpServerInstance
@@ -205,9 +261,8 @@ class HttpServer
         std::string GetErrorPagePath(int code) const;
         std::string GetErrorTemplatePath() const;
         std::string GetForward(HttpMethod method, const std::string &path) const;
-        std::pair<std::vector<HandleFunc>,
-                  std::unordered_map<std::string, std::string>>
-        GetHandles(HttpMethod method, const std::string &path) const;
+        RouteMatch GetHandles(HttpMethod method,
+                              const std::string &path) const;
         uco::task<void> ServeHttpClient(int fd, sockaddr_in addr);
 
         uco::task<void> run();
@@ -224,9 +279,7 @@ class HttpServer
     };
 
   private:
-    std::pair<std::vector<HandleFunc>,
-              std::unordered_map<std::string, std::string>>
-    find_handles(HttpMethod method, const std::string &path);
+    RouteMatch find_handles(HttpMethod method, const std::string &path);
     // 配置实体化 (由构造函数调用): 存参数 + 建 worker + signalfd.
     void Init(int port, int num_threads, int keepalivecnt, int keepalivesec,
               int recvtimeoutsec, int sendtimeoutsec,
@@ -261,13 +314,13 @@ class HttpServer::RouteGroup
 {
   public:
     template <typename... Fn>
-        requires(std::convertible_to<Fn, HandleFunc> && ...)
+        requires(std::constructible_from<Middleware, Fn> && ...)
     RouteGroup Group(const std::string &prefix, Fn... middleware) const
     {
-        std::vector<HandleFunc> handles = m_middleware;
-        (handles.emplace_back(std::move(middleware)), ...);
+        std::vector<Middleware> chain = m_middleware;
+        (chain.emplace_back(std::move(middleware)), ...);
         return RouteGroup(m_server, JoinPath(m_prefix, prefix),
-                          std::move(handles));
+                          std::move(chain));
     }
 
     template <typename... Fn>
@@ -297,7 +350,7 @@ class HttpServer::RouteGroup
     friend class HttpServer;
 
     RouteGroup(HttpServer *server, std::string prefix,
-               std::vector<HandleFunc> middleware)
+               std::vector<Middleware> middleware)
         : m_server(server), m_prefix(std::move(prefix)),
           m_middleware(std::move(middleware))
     {
@@ -307,28 +360,38 @@ class HttpServer::RouteGroup
     void Register(HttpMethod method, const std::string &path,
                   Fn... handles) const
     {
-        std::vector<HandleFunc> chain = m_middleware;
+        const std::string full_path = JoinPath(m_prefix, path);
+        std::vector<HandleFunc> chain = InstantiateMiddleware(full_path);
+        chain.reserve(chain.size() + sizeof...(handles));
         (chain.emplace_back(std::move(handles)), ...);
-        m_server->AddRoute(method, JoinPath(m_prefix, path), std::move(chain));
+        m_server->AddRoute(method, full_path, std::move(chain));
     }
 
     static std::string JoinPath(const std::string &prefix,
                                 const std::string &path);
+    std::vector<HandleFunc> InstantiateMiddleware(
+        std::string_view route_pattern) const;
 
     HttpServer *m_server;
     std::string m_prefix;
-    std::vector<HandleFunc> m_middleware;
+    std::vector<Middleware> m_middleware;
 };
 
 template <typename... Fn>
-    requires(std::convertible_to<Fn, HttpServer::HandleFunc> && ...)
+    requires(std::constructible_from<HttpServer::Middleware, Fn> && ...)
 HttpServer::RouteGroup HttpServer::Group(const std::string &prefix,
                                          Fn... middleware)
 {
-    std::vector<HandleFunc> handles;
-    handles.reserve(sizeof...(middleware));
-    (handles.emplace_back(std::move(middleware)), ...);
-    return RouteGroup(this, prefix, std::move(handles));
+    std::vector<Middleware> chain;
+    chain.reserve(sizeof...(middleware));
+    (chain.emplace_back(std::move(middleware)), ...);
+    return RouteGroup(this, prefix, std::move(chain));
+}
+
+/** @brief 包装一个按规范路由模板创建独立 handler 的中间件工厂。 */
+inline HttpServer::Middleware PerRoute(HttpServer::HandleFactory factory)
+{
+    return HttpServer::Middleware::PerRoute(std::move(factory));
 }
 
 /**
@@ -417,10 +480,18 @@ class HttpContext
                 std::vector<HttpServer::HandleFunc> &handles,
                 std::unordered_map<std::string, std::string> &params,
                 std::unordered_map<std::string, std::string> &queryParams,
-                const std::string &clientIP = "");
+                const std::string &clientIP = "",
+                std::string routePattern = "");
 
     // e.g.: /example?foo=bar -> /example
     std::string GetRequestUrl() const;
+
+    /**
+     * @brief 返回当前请求匹配到的规范路由模板。
+     * @return 例如请求 /login/123 匹配 /login/:id 时返回 /login/:id；
+     *         未匹配路由时返回空串。
+     */
+    const std::string &GetRoutePattern() const noexcept;
 
     /// 客户端 IP (TCP peer, 由连接层填入; 直连部署不可伪造,
     /// 反向代理后为代理 IP).
@@ -572,12 +643,17 @@ class HttpContext
     void DisableLog() { m_bLog = false; }
 
 
-    /** @brief 绑定成员协程，或在注册时调用无参 handler 工厂。 */
+    /**
+     * @brief 绑定成员协程，或适配无参 handler 工厂。
+     *
+     * 成员协程生成普通共享中间件；无参工厂直接用于具体路由时调用一次，
+     * 用于 Group 时则延迟到每条最终路由注册时分别调用。
+     */
     template <typename...>
     inline static constexpr bool kInvalidHandlerMethod = false;
 
     template <typename T, typename Method>
-    static HttpServer::HandleFunc MakeHandlerImpl(T &obj, Method method)
+    static HttpServer::Middleware MakeHandlerImpl(T &obj, Method method)
     {
         // 成员协程：每次请求传入当前 ctx 调用。
         if constexpr (std::is_invocable_r_v<uco::task<void>, Method, T *,
@@ -588,11 +664,18 @@ class HttpContext
                 co_return co_await std::invoke(method, ptr, ctx);
             };
         }
-        // 无参工厂：注册时调用一次，复用其返回的 handler。
+        // 无参 handler 工厂：
+        // 1. 作为 GET/HEAD/POST 等具体路由的 handler 时，在该路由注册时
+        //    立即调用一次，返回的 handler 由该路由后续所有请求复用；
+        // 2. 作为 Group 中间件时暂不调用，等组内每条 GET/HEAD/POST 路由
+        //    注册时分别调用一次，使每条最终路由持有独立的 handler 状态。
         else if constexpr (
             std::is_invocable_r_v<HttpServer::HandleFunc, Method, T *>)
         {
-            return std::invoke(method, &obj);
+            return HttpServer::Middleware::PerRoute(
+                [ptr = &obj, method](std::string_view) {
+                    return std::invoke(method, ptr);
+                });
         }
         else
         {
@@ -616,6 +699,7 @@ class HttpContext
     bool m_bHasSetRspContent = false;
     bool m_bLog = true; // 获取静态资源等操作无需日志, 以免刷屏.
     std::vector<HttpServer::HandleFunc> m_handles;
+    std::string m_sRoutePattern;
     std::unordered_map<std::string, std::string> m_mapParams;
     std::unordered_map<std::string, std::string> m_mapQueryParams;
     FormFields m_mapFormFields;
@@ -631,4 +715,4 @@ class HttpContext
     HttpContext::MakeHandlerImpl(                   \
       (obj),                                        \
       &std::remove_cvref_t<decltype((obj))>::method \
-    ) 
+    )

@@ -245,7 +245,9 @@ task<void> RunHttpServer(uco::YamlConfig app_config)
         MakeHandler(store, Sessions)
     );
     auto postGrp = baseGrp.Group(
-        "", MakeHandler(csrf, SessionCheck)
+        "",
+        MakeHandler(limiter, ByIP),
+        MakeHandler(csrf, SessionCheck)
     );
 
     baseGrp.GET("/api/me", MakeHandler(userController, CurrentUser));
@@ -259,20 +261,17 @@ task<void> RunHttpServer(uco::YamlConfig app_config)
     );
     postGrp.POST(
         "/register",
-        MakeHandler(limiter, ByIP),
         MakeHandler(limiter, BySession),
         MakeHandler(userController, RequireAnonymous),
         MakeHandler(userController, Register)
     );
     postGrp.POST(
         "/login",
-        MakeHandler(limiter, ByIP),
         MakeHandler(limiter, ByAccount),
         MakeHandler(userController, Login)
     );
     postGrp.POST(
         "/logout",
-        MakeHandler(limiter, ByIP),
         MakeHandler(limiter, BySession),
         MakeHandler(userController, Logout)
     );
