@@ -66,6 +66,7 @@ bool Counter::Allow(const std::string &key)
         }
         if (m_entries.size() >= kMaxKeys)
         {
+            LOGWRN("entries full");
             return false;
         }
     }

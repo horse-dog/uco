@@ -804,7 +804,7 @@ int Session::EffectiveMaxAge() const
 
 int Session::MaxAnonymousAge() const
 {
-    return m_ptrStore->m_maxAge;
+    return m_ptrStore->m_maxAnonymousAge;
 }
 
 
