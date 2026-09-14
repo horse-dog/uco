@@ -17,15 +17,14 @@
  * @code
  *   ratelimit::FixedWindow limiter(config);
  *   httpserver.POST("/login",
- *       MakeRejectHandler(limiter, ByIP),
- *       MakeRejectHandler(store, Sessions),
- *       MakeRejectHandler(csrf, SessionCheck),
- *       MakeRejectHandler(limiter, ByAccount),
- *       MakeRejectHandler(controller, Login));
+ *       MakeHandler(limiter, ByIP),
+ *       MakeHandler(store, Sessions),
+ *       MakeHandler(csrf, SessionCheck),
+ *       MakeHandler(limiter, ByAccount),
+ *       MakeHandler(controller, Login));
  * @endcode
  */
 
-#include "core/uconfig.h"
 #include "http/httpserver.h"
 
 #include <cstdint>
@@ -33,7 +32,6 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
-#include <utility>
 
 namespace ratelimit
 {
@@ -56,11 +54,8 @@ class Counter
     Counter(Counter &&) = delete;
     Counter &operator=(Counter &&) = delete;
 
-    /**
-     * @brief 记录 key 的本次请求并判断是否允许。
-     * @return {是否允许, 建议重试秒数}；允许时重试秒数为 0。
-     */
-    std::pair<bool, int> Allow(const std::string &key);
+    /** @brief 记录 key 的本次请求并判断是否允许；建议重试秒数经 RetryAfter 获取。 */
+    bool Allow(const std::string &key);
 
     /**
      * @brief 无副作用地计算当前固定窗口的剩余秒数。
@@ -94,60 +89,17 @@ class Counter
 using RejectHandler = std::function<
     uco::task<bool>(HttpContext *, Counter &, const std::string &)>;
 
-/** @brief 按计数维度创建限流中间件的接口。 */
-class Limiter
-{
-  public:
-    virtual ~Limiter() = default;
-
-    /**
-     * @brief 使用自定义键提取器创建限流处理函数。
-     * @param key_getter 每个请求调用一次，返回值原样传给 reject_handler。
-     * @param limit 窗口内允许的最大请求数，必须大于 0。
-     * @param window_sec 固定窗口秒数，必须大于 0。
-     * @param reject_handler 当前中间件的拒绝处理器；为空时使用默认逻辑。
-     * @return 独占当前路由挂载点计数器的处理函数。
-     */
-    virtual HttpServer::HandleFunc
-    ByKey(KeyGetter key_getter, int limit, int window_sec,
-          RejectHandler reject_handler = {}) = 0;
-
-    /**
-     * @brief 创建按客户端 IP 计数的限流处理函数。
-     * @return 独占当前路由挂载点计数器的处理函数。
-     */
-    virtual HttpServer::HandleFunc ByIP() = 0;
-
-    /**
-     * @brief 创建仅对新匿名会话按客户端 IP 计数的限流处理函数。
-     * @return 独占当前路由挂载点计数器的处理函数。
-     */
-    virtual HttpServer::HandleFunc ByNewSessionIP() = 0;
-
-    /**
-     * @brief 创建按 Session ID 计数的限流处理函数。
-     * @return 独占当前路由挂载点计数器的处理函数。
-     */
-    virtual HttpServer::HandleFunc BySession() = 0;
-
-    /**
-     * @brief 创建按登录表单账号计数的限流处理函数。
-     * @return 独占当前路由挂载点计数器的处理函数。
-     */
-    virtual HttpServer::HandleFunc ByAccount() = 0;
-};
-
 /**
  * @brief 固定窗口限流实现。
  *
  * 构造时保存配置快照；调用 ByXXX() 时从 rate_limit.* 读取对应维度阈值，
  * 并创建一个由返回闭包持有的独立固定窗口计数器。
  */
-class FixedWindow final : public Limiter
+class FixedWindow
 {
   public:
-    explicit FixedWindow(const uco::YamlConfig &config);
-    ~FixedWindow() override = default;
+    FixedWindow();
+    ~FixedWindow() = default;
 
     FixedWindow(const FixedWindow &) = delete;
     FixedWindow &operator=(const FixedWindow &) = delete;
@@ -164,35 +116,23 @@ class FixedWindow final : public Limiter
      */
     HttpServer::HandleFunc
     ByKey(KeyGetter key_getter, int limit, int window_sec,
-          RejectHandler reject_handler = {}) override;
+          RejectHandler reject_handler = {});
 
     /**
-     * @brief 使用 rate_limit.ip 配置创建按客户端 IP 计数的处理函数。
+     * @brief 按客户端 IP 计数的处理函数。
      * @return 独占当前路由挂载点计数器的处理函数。
      */
-    HttpServer::HandleFunc ByIP() override;
+    HttpServer::HandleFunc
+    ByIP(int limit = 0, int window_sec = 60,
+         RejectHandler reject_handler = {});
 
     /**
-     * @brief 使用 rate_limit.new_session_ip 配置创建仅针对新匿名会话、
-     *        按客户端 IP 计数的处理函数。
+     * @brief 按 Session ID 计数的处理函数。
      * @return 独占当前路由挂载点计数器的处理函数。
      */
-    HttpServer::HandleFunc ByNewSessionIP() override;
-
-    /**
-     * @brief 使用 rate_limit.session 配置创建按 Session ID 计数的处理函数。
-     * @return 独占当前路由挂载点计数器的处理函数。
-     */
-    HttpServer::HandleFunc BySession() override;
-
-    /**
-     * @brief 使用 rate_limit.account 配置创建按登录表单账号计数的处理函数。
-     * @return 独占当前路由挂载点计数器的处理函数。
-     */
-    HttpServer::HandleFunc ByAccount() override;
-
-  private:
-    uco::YamlConfig m_config;
+    HttpServer::HandleFunc
+    BySession(int limit = 0, int window_sec = 60,
+              RejectHandler reject_handler = {});
 };
 
 } // namespace ratelimit

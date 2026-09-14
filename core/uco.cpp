@@ -344,6 +344,7 @@ void thread_co_env::schedule()
         while (true)
         {
             bool sync_list_empty = false;
+            bool sqe_co_list_no_sqe = false;
             // process sqe list coroutines.
             while (!sqe_co_list->empty())
             {
@@ -351,6 +352,7 @@ void thread_co_env::schedule()
                 resume(NODE2ADDR(co));
                 if (flags & FLAG_ACQUIRE_SQE_FAILED)
                 {
+                    sqe_co_list_no_sqe = true;
                     break;
                 }
             }
@@ -379,7 +381,7 @@ void thread_co_env::schedule()
             }
 
             // 退出条件
-            if (sqe_co_list->empty() && sync_list_empty && yield_co_list->empty())
+            if ((sqe_co_list->empty() || sqe_co_list_no_sqe) && sync_list_empty && yield_co_list->empty())
             {
                 break;
             }
@@ -415,6 +417,7 @@ void thread_co_env::schedule()
             else
             {
                 // 等待且一毫秒超时.
+                SYSWRN("retry_register_read_syncfd failed and wait timeout 1ms");
                 struct __kernel_timespec ts = {0, 1000000};
                 struct io_uring_cqe *wc = nullptr;
                 io_uring_submit_and_wait_timeout((struct io_uring *)uring,

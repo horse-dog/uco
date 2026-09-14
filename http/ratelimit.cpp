@@ -1,6 +1,5 @@
 #include "http/ratelimit.h"
 
-#include "core/uconfig.h"
 #include "core/ulog.h"
 #include "http/session.h"
 
@@ -48,7 +47,7 @@ int Counter::RetryAfter() const
     return retry_sec < 1 ? 1 : retry_sec;
 }
 
-std::pair<bool, int> Counter::Allow(const std::string &key)
+bool Counter::Allow(const std::string &key)
 {
     const uint64_t now_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -67,10 +66,7 @@ std::pair<bool, int> Counter::Allow(const std::string &key)
         }
         if (m_entries.size() >= kMaxKeys)
         {
-            const uint64_t remain_ms =
-                (current_window + 1) * m_windowMs - now_ms;
-            const int retry_sec = static_cast<int>((remain_ms + 999) / 1000);
-            return {false, retry_sec < 1 ? 1 : retry_sec};
+            return false;
         }
     }
 
@@ -82,13 +78,10 @@ std::pair<bool, int> Counter::Allow(const std::string &key)
     }
     if (entry.count >= static_cast<uint64_t>(m_limit))
     {
-        const uint64_t remain_ms =
-            (current_window + 1) * m_windowMs - now_ms;
-        const int retry_sec = static_cast<int>((remain_ms + 999) / 1000);
-        return {false, retry_sec < 1 ? 1 : retry_sec};
+        return false;
     }
     ++entry.count;
-    return {true, 0};
+    return true;
 }
 
 namespace
@@ -105,13 +98,12 @@ struct FixedWindowDetail
         {
             co_return false;
         }
-        auto [allowed, retry_sec] = counter.Allow(key);
-        if (allowed)
+        if (counter.Allow(key))
         {
             co_return false;
         }
         LOGWRN("ratelimit: blocked, route:", ctx->GetRoutePattern(),
-               ", retry_after:", retry_sec);
+               ", retry_after:", counter.RetryAfter());
         ctx->Data(429, "application/json",
                   "{\"code\":429,\"msg\":\"too many requests\"}");
         co_return true;
@@ -143,7 +135,7 @@ struct FixedWindowDetail
         }
 
         SetRetryAfter(*counter, ctx);
-        ctx->Abort();
+        ctx->Abort("too many requests");
     }
 
     static HttpServer::HandleFunc
@@ -169,7 +161,7 @@ struct FixedWindowDetail
 
 } // namespace
 
-FixedWindow::FixedWindow(const uco::YamlConfig &config) : m_config(config) {}
+FixedWindow::FixedWindow() {}
 
 HttpServer::HandleFunc
 FixedWindow::ByKey(KeyGetter key_getter, int limit, int window_sec,
@@ -179,52 +171,19 @@ FixedWindow::ByKey(KeyGetter key_getter, int limit, int window_sec,
                                    std::move(reject_handler));
 }
 
-HttpServer::HandleFunc FixedWindow::ByIP()
+HttpServer::HandleFunc
+FixedWindow::ByIP(int limit, int window_sec, RejectHandler reject_handler)
 {
-    return ByKey(
-        [](HttpContext *ctx) { return ctx->ClientIP(); },
-        m_config.Get<int>("rate_limit.ip_per_window", 256),
-        m_config.Get<int>("rate_limit.window_sec", 60));
+    return ByKey([](HttpContext *ctx) { return ctx->ClientIP(); },
+                 limit, window_sec, std::move(reject_handler));
 }
 
-HttpServer::HandleFunc FixedWindow::ByNewSessionIP()
-{
-    return ByKey(
-        [](HttpContext *ctx) {
-            return Session::FromContext(ctx)->IsNew() ? ctx->ClientIP() : "";
-        },
-        m_config.Get<int>("rate_limit.new_session_ip_per_window", 30),
-        m_config.Get<int>("rate_limit.window_sec", 60));
-}
-
-HttpServer::HandleFunc FixedWindow::BySession()
+HttpServer::HandleFunc FixedWindow::BySession(int limit, int window_sec,
+                                              RejectHandler reject_handler)
 {
     return ByKey(
         [](HttpContext *ctx) { return Session::FromContext(ctx)->ID(); },
-        m_config.Get<int>("rate_limit.session_per_window", 10),
-        m_config.Get<int>("rate_limit.window_sec", 60));
-}
-
-HttpServer::HandleFunc FixedWindow::ByAccount()
-{
-    return ByKey(
-        [](HttpContext *ctx) {
-            const auto &form = ctx->BindForm();
-            const auto it = form.find("username");
-            if (it == form.end())
-            {
-                ctx->Status(400);
-                ctx->Abort("username field not exist in form");
-            }
-            if (it->second.empty())
-            {
-                ctx->Status(400);
-                ctx->Abort("empty username field in form");
-            }
-            return it->second;
-        },
-        m_config.Get<int>("rate_limit.account_per_window", 10),
-        m_config.Get<int>("rate_limit.window_sec", 60));
+        limit, window_sec, std::move(reject_handler));
 }
 
 } // namespace ratelimit

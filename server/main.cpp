@@ -137,25 +137,25 @@ task<void> post(HttpContext *context)
 void PrepareStaticResource(HttpServer& svr)
 {
     {
-        auto g = svr.Group("", CacheControl("public, max-age=3600"));
-        g.Static("/css/*");
-        g.Static("/fonts/*filename");
-        g.Static("/images/*filename");
-        g.Static("/js/*filename");
+        auto grp = svr.Group("", CacheControl("public, max-age=3600"));
+        grp.Static("/css/*");
+        grp.Static("/fonts/*filename");
+        grp.Static("/images/*filename");
+        grp.Static("/js/*filename");
     }
 
     {
-        auto g = svr.Group("", CacheControl("public, max-age=86400"));
-        g.Static("/video/*filename");
-        g.Static("/music/*filename");
+        auto grp = svr.Group("", CacheControl("public, max-age=86400"));
+        grp.Static("/video/*filename");
+        grp.Static("/music/*filename");
     }
 
     {
         // HTML 需要及时获取新版本，允许存储但每次使用前必须验证。
-        auto g = svr.Group("", CacheControl("no-cache"));
-        g.Static("/index.html");
-        g.Static("/video.html");
-        g.Static("/picture.html");
+        auto grp = svr.Group("", CacheControl("no-cache"));
+        grp.Static("/index.html");
+        grp.Static("/video.html");
+        grp.Static("/picture.html");
     }
 }
 
@@ -185,34 +185,74 @@ void PrepareErrorPage(HttpServer& svr)
 
 void PrepareDemo(HttpServer& svr)
 {
-    auto dynamic = svr.Group("", CacheControl("no-cache"));
-    dynamic.GET("/hello", middleware1, middleware2, middleware3, hello);
-    dynamic.GET("/redirect", redirect);
-    dynamic.GET("/status", status_page);
-    dynamic.GET("/ping", ping);
-    dynamic.GET("/template", template_page);
-    dynamic.HEAD("/head", head);
-    dynamic.POST("/post", post);
+    auto grp = svr.Group("", CacheControl("no-cache"));
+    grp.GET("/hello", middleware1, middleware2, middleware3, hello);
+    grp.GET("/redirect", redirect);
+    grp.GET("/status", status_page);
+    grp.GET("/ping", ping);
+    grp.GET("/template", template_page);
+    grp.HEAD("/head", head);
+    grp.POST("/post", post);
 }
 
-task<void> RunHttpServer(uco::YamlConfig app_config)
+// 自定义限流器 KeyGetter.
+std::string GetUserNameForKey(HttpContext *ctx)
+{
+    auto&& form = ctx->BindForm();
+    auto it = form.find("username");
+    if (it == form.end())
+    {
+        LOGWRN("username field not exist in form");
+        ctx->Status(400);
+        ctx->Abort("username field not exist in form");
+    }
+    if (it->second.empty())
+    {
+        LOGWRN("empty username field in form");
+        ctx->Status(400);
+        ctx->Abort("empty username field in form");
+    }
+    return it->second;
+}
+
+// 自定义限流器 RejectHandler.
+uco::task<bool> RejectOnlyNewSession(
+    HttpContext *ctx, ratelimit::Counter& counter, const std::string& key)
+{
+    auto session = Session::FromContext(ctx);
+    if (!session->IsNew()) co_return false; // 老会话不拦截.
+
+    if (counter.Allow(key)) co_return false; // 未超限, 继续链.
+
+    LOGWRN("ratelimit: blocked, route:", ctx->GetRoutePattern(),
+            ", retry_after:", counter.RetryAfter());
+    ctx->Data(
+        429,
+        "application/json",
+        "{\"code\":429,\"msg\":\"too many requests\"}"
+    );
+    ctx->Abort("too many requests");
+    co_return true;
+}
+
+task<void> RunHttpServer(uco::YamlConfig config)
 {
     using namespace webserver;
 
     // 1. 定义 server 实例.
-    HttpServer svr(app_config);
+    HttpServer svr(config);
 
     // 2. 定义 cpu 线程池.
-    size_t cpu_threads = app_config.Get<size_t>("cpu_pool.threads", 1);
-    size_t cpu_max_pending = app_config.Get<size_t>("cpu_pool.max_pending", 32);
+    size_t cpu_threads = config.Get<size_t>("cpu_pool.threads", 1);
+    size_t cpu_max_pending = config.Get<size_t>("cpu_pool.max_pending", 32);
     uco::thread_pool thread_pool(cpu_threads, cpu_max_pending);
 
     // 3. 定义密码哈希组件 (重 cpu 逻辑, 依赖注入 cpu 线程池).
     security::BcryptPasswordHasher hasher(thread_pool);
 
     // 4. 定义连接池.
-    usql::upool mysql_pool(app_config);
-    uredis::upool redis_pool(app_config);
+    usql::upool mysql_pool(config);
+    uredis::upool redis_pool(config);
 
     // 5. 定义 DAO 实例 (依赖 SQL 连接池).
     dao::MySqlUserDao userDAO(mysql_pool);
@@ -224,10 +264,14 @@ task<void> RunHttpServer(uco::YamlConfig app_config)
     csrf::Csrf csrf;
 
     // 8. 定义 SessionStore.
-    SessionStore store(app_config, redis_pool);
+    SessionStore store(config, redis_pool);
 
     // 9. 定义限流器.
-    ratelimit::FixedWindow limiter(app_config);
+    ratelimit::FixedWindow limiter;
+    auto win = config.Get<int>("rate_limit.window", 60);
+    auto limit_ip = config.Get<int>("rate_limit.ip", 1024);
+    auto limit_session = config.Get<int>("rate_limit.session", 32);
+    auto limit_account = config.Get<int>("rate_limit.account", 16);
 
     // 10. 定义 Controller 实例.
     controller::UserController userController(userService);
@@ -239,40 +283,41 @@ task<void> RunHttpServer(uco::YamlConfig app_config)
     PrepareDemo(svr);
 
     // 会话及认证相关响应（包括中间件提前返回的 4xx）均禁止存储。
-    auto baseGrp = svr.Group(
+    auto getGrp = svr.Group(
         "",
         CacheControl("private, no-store"),
-        MakeHandler(store, Sessions)
+        MakeHandler(store, Sessions) // 获取 session.
     );
-    auto postGrp = baseGrp.Group(
+    auto postGrp = svr.Group(
         "",
-        MakeHandler(limiter, ByIP),
-        MakeHandler(csrf, SessionCheck)
+        CacheControl("private, no-store"),
+        MakeHandler(limiter, ByIP, limit_ip, win), // 按 ip 限流.
+        MakeHandler(store, Sessions), // 获取 session.
+        MakeHandler(limiter, BySession, limit_session, win), // 按 session 限流, 必须编排在 获取 session 之后.
+        MakeHandler(csrf, SessionCheck) // csrf 校验.
     );
 
-    baseGrp.GET("/api/me", MakeHandler(userController, CurrentUser));
-    baseGrp.GET("/register", MakeHandler(userController, RegisterPage));
-    baseGrp.GET("/login", MakeHandler(userController, LoginPage));
-    baseGrp.GET("/welcome", MakeHandler(userController, WelcomePage));
-    baseGrp.GET(
+    getGrp.GET("/api/me", MakeHandler(userController, CurrentUser));
+    getGrp.GET("/register", MakeHandler(userController, RegisterPage));
+    getGrp.GET("/login", MakeHandler(userController, LoginPage));
+    getGrp.GET("/welcome", MakeHandler(userController, WelcomePage));
+    getGrp.GET(
         "/api/csrf",
-        MakeHandler(limiter, ByNewSessionIP),
-        MakeHandler(csrf, SessionIssue)
-    );
-    postGrp.POST(
-        "/register",
-        MakeHandler(limiter, BySession),
-        MakeHandler(userController, RequireAnonymous),
-        MakeHandler(userController, Register)
+        MakeHandler(limiter, ByIP, limit_ip, win, RejectOnlyNewSession), // 只按照 ip 限制创建新的匿名会话，防止打爆 redis.
+        MakeHandler(csrf, SessionIssue) // 下发 csrf_token.
     );
     postGrp.POST(
         "/login",
-        MakeHandler(limiter, ByAccount),
+        MakeHandler(limiter, ByKey, GetUserNameForKey, limit_account, win), // 按 account 限流.
         MakeHandler(userController, Login)
     );
     postGrp.POST(
+        "/register",
+        MakeHandler(userController, RequireAnonymous), // 已登录拒绝调用注册.
+        MakeHandler(userController, Register)
+    );
+    postGrp.POST(
         "/logout",
-        MakeHandler(limiter, BySession),
         MakeHandler(userController, Logout)
     );
 

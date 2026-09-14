@@ -12,6 +12,7 @@
 #include <map>
 #include <string_view>
 #include <type_traits>
+#include <tuple>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
@@ -315,7 +316,7 @@ class HttpServer::RouteGroup
   public:
     template <typename... Fn>
         requires(std::constructible_from<Middleware, Fn> && ...)
-    RouteGroup Group(const std::string &prefix, Fn... middleware) const
+    HttpServer::RouteGroup Group(const std::string &prefix, Fn... middleware) const
     {
         std::vector<Middleware> chain = m_middleware;
         (chain.emplace_back(std::move(middleware)), ...);
@@ -644,16 +645,18 @@ class HttpContext
 
 
     /**
-     * @brief 绑定成员协程，或适配无参 handler 工厂。
+     * @brief 绑定成员协程，或适配 handler 工厂（可带不定构造参数）。
      *
-     * 成员协程生成普通共享中间件；无参工厂直接用于具体路由时调用一次，
+     * 成员协程生成普通共享中间件；工厂直接用于具体路由时调用一次，
      * 用于 Group 时则延迟到每条最终路由注册时分别调用。
      */
     template <typename...>
     inline static constexpr bool kInvalidHandlerMethod = false;
 
-    template <typename T, typename Method>
-    static HttpServer::Middleware MakeHandlerImpl(T &obj, Method method)
+    template <typename T, typename Method, typename Invoker, typename... Args>
+    static HttpServer::Middleware MakeHandlerImpl(T &obj, Method method,
+                                                  Invoker invoker,
+                                                  Args &&...args)
     {
         // 成员协程：每次请求传入当前 ctx 调用。
         if constexpr (std::is_invocable_r_v<uco::task<void>, Method, T *,
@@ -664,24 +667,31 @@ class HttpContext
                 co_return co_await std::invoke(method, ptr, ctx);
             };
         }
-        // 无参 handler 工厂：
+        // handler 工厂（额外参数为工厂构造参数）：
         // 1. 作为 GET/HEAD/POST 等具体路由的 handler 时，在该路由注册时
         //    立即调用一次，返回的 handler 由该路由后续所有请求复用；
         // 2. 作为 Group 中间件时暂不调用，等组内每条 GET/HEAD/POST 路由
         //    注册时分别调用一次，使每条最终路由持有独立的 handler 状态。
         else if constexpr (
-            std::is_invocable_r_v<HttpServer::HandleFunc, Method, T *>)
+            std::is_invocable_r_v<HttpServer::HandleFunc, Invoker, T *,
+                                  Args...>)
         {
             return HttpServer::Middleware::PerRoute(
-                [ptr = &obj, method](std::string_view) {
-                    return std::invoke(method, ptr);
+                [ptr = &obj, invoker,
+                 tup = std::make_tuple(std::forward<Args>(args)...)](
+                    std::string_view) {
+                    return std::apply(
+                        [ptr, invoker](const auto &...stored_args) {
+                            return std::invoke(invoker, ptr, stored_args...);
+                        },
+                        tup);
                 });
         }
         else
         {
             static_assert(kInvalidHandlerMethod<Method>,
                           "MakeHandler requires task<void>(HttpContext*) or "
-                          "HandleFunc()");
+                          "HandleFunc(...)");
         }
     }
 
@@ -711,8 +721,12 @@ class HttpContext
     SameSite m_eSameSite = eSameSiteDefault;
 };
 
-#define MakeHandler(obj, method)                    \
-    HttpContext::MakeHandlerImpl(                   \
-      (obj),                                        \
-      &std::remove_cvref_t<decltype((obj))>::method \
+#define MakeHandler(obj, method, ...)                                  \
+    HttpContext::MakeHandlerImpl(                                      \
+      (obj),                                                           \
+      &std::remove_cvref_t<decltype((obj))>::method,                   \
+      [](auto *ptr, auto &&...args) -> decltype(auto) {                \
+          return ptr->method(std::forward<decltype(args)>(args)...);   \
+      }                                                                \
+      , ##__VA_ARGS__                                                  \
     )
