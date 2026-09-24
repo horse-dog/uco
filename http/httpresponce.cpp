@@ -475,7 +475,9 @@ StaticResourcePool::FileCacheI::~FileCacheI()
     if (first >= 0)
     {
         LOGDBG("close fd: %d", first);
-        go uclose(first);
+        // 本地文件 close 为微秒级非阻塞调用; 且析构可能发生在调度器停转后
+        // (线程/进程退出), 异步协程将失去执行机会导致 fd 泄漏, 故直接同步关闭.
+        close(first);
     }
     first = -1;
 }

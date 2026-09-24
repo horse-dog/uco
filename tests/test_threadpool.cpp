@@ -1,6 +1,6 @@
-#include "core/thread_upool.h"
+#include "core/thread_pool.h"
 #include "core/uco.h"
-#include "core/usync.h"
+#include "core/uio.h"
 #include <chrono>
 #include <thread>
 
@@ -10,31 +10,26 @@ void ugly_add(int x, int y, int& result)
     result = x + y;
 }
 
-uco::task<void> run_task(uco::thread_upool& pool)
-{
-    int result = 0;
-    int ret = co_await pool.execute(ugly_add, 3, 5, result);
-    LOGMSG(NR(ret), NR(result));
-    co_await pool.close();
-    co_return;
-}
-
 uco::task<void> demo()
 {
-    uco::thread_upool pool(0);
-
-    uco::cobatch batchrunner;
-    batchrunner.add(pool.add_current());
-    batchrunner.add(run_task(pool));
-    co_await batchrunner.run();
-
-    co_await pool.close();
+    uco::thread_pool pool(1);
+    int result = 0;
+    LOGMSG("BEGIN");
+    go []() -> uco::task<void> {
+        for (int i = 1; i <= 20; i++)
+        {
+            co_await uco_sleep(std::chrono::milliseconds(100));
+            LOGDBG(NR(i));
+        }
+    }();
+    int ret = co_await pool.execute(ugly_add, 3, 5, result);
+    LOGMSG(NR(ret), NR(result));
     co_return;
 }
 
 int main()
 {
-    uco::OpenLog("test", LogLevel::INFO, LogMode::CONSOLE, true);
+    uco::OpenLog("test", LogLevel::DEBUG, LogMode::CONSOLE, false);
     go demo();
     return 0;
 }
