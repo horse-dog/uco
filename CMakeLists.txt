@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
+# 默认 Release 构建 (-O3 -DNDEBUG); 显式传入 -DCMAKE_BUILD_TYPE=Debug 可覆盖.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (default Release)" FORCE)
+endif()
+
 # 可选开发工具：构建 UCO clang-tidy 动态插件，以及静态注册该检查的
 # 定制 clangd。它们不属于项目运行时依赖，缺少工具链时不得影响正常构建。
 option(UCO_BUILD_CLANG_TIDY_PLUGIN
@@ -53,7 +58,7 @@ find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 set(GENERATED_DIR ${CMAKE_CURRENT_SOURCE_DIR}/gen)
 file(MAKE_DIRECTORY ${GENERATED_DIR}) # gen 不存在时创建 (全新环境直接构建).
 
-option(USE_JEMALLOC "Use jemalloc" OFF)
+option(USE_JEMALLOC "Prefer jemalloc if present on the system" ON)
 
 # 生成结果经 SRCS_VAR/HDRS_VAR 回传父作用域 (供 add_executable 引用).
 function(uco_proto_generate PROTO_ROOT OUT_DIR SRCS_VAR HDRS_VAR)
@@ -103,10 +108,11 @@ add_library(uco ${CORE_UCO_SRC})
 target_link_libraries(uco PRIVATE uhook PUBLIC OpenSSL::Crypto)
 
 # ---- usql: 基于 io_uring + 协程的异步 MySQL 支持 (可选, 自动检测) ----
+# 仅链接 Oracle 官方 libmysqlclient, 不兼容 MariaDB 命名.
 option(USE_MYSQL "Enable usql (async MySQL C API support)" ON)
 if(USE_MYSQL)
   find_path(USQL_MYSQL_INCLUDE_DIR mysql/mysql.h)
-  find_library(USQL_MYSQL_LIBRARY NAMES mysqlclient mariadbclient mariadb)
+  find_library(USQL_MYSQL_LIBRARY NAMES mysqlclient)
   if(USQL_MYSQL_INCLUDE_DIR AND USQL_MYSQL_LIBRARY)
     message(STATUS "MySQL client found: ${USQL_MYSQL_LIBRARY}, usql enabled")
     target_sources(uco PRIVATE core/usql.cpp)
@@ -139,8 +145,21 @@ if(CRYPT_LIBRARY)
 else()
   message(FATAL_ERROR "libcrypt not found: service 层 bcrypt 依赖 libxcrypt")
 endif()
+
+# ---- jemalloc (自动检测): 系统中存在则启用, 不存在则回退默认分配器 ----
+# USE_JEMALLOC 语义为"优先使用 jemalloc"; 实际启用以 UCO_JEMALLOC_ENABLED 为准.
+set(UCO_JEMALLOC_ENABLED OFF)
 if(USE_JEMALLOC)
-  target_link_libraries(server PRIVATE jemalloc)
+  find_library(UCO_JEMALLOC_LIBRARY NAMES jemalloc)
+  if(UCO_JEMALLOC_LIBRARY)
+    set(UCO_JEMALLOC_ENABLED ON)
+    message(STATUS "jemalloc found: ${UCO_JEMALLOC_LIBRARY}")
+  else()
+    message(STATUS "jemalloc not found, falling back to default allocator")
+  endif()
+endif()
+if(UCO_JEMALLOC_ENABLED)
+  target_link_libraries(server PRIVATE ${UCO_JEMALLOC_LIBRARY})
 endif()
 
 add_executable(ulogcsm core/udaemon.cpp core/ulogcsm.cpp)
